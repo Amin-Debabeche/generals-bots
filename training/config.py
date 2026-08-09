@@ -50,6 +50,13 @@ class PPOConfig:
     # and closing on the opponent, which matters once that's a genuine
     # multi-hundred-turn campaign rather than a small-board skirmish.
     contact_shaping_weight: float = 0.15
+    # Exponential moving average of network weights, updated every iteration
+    # (see training/train.py's ema_net) and used for eval/promotion decisions
+    # and as the frozen Stage-D reference -- insulates those signals from
+    # single-iteration noise, unlike reading the raw live (currently-being-
+    # gradient-updated) network directly. 0.999 matches strakam/AverageJoe's
+    # default (the #1-ranked real generals.io bot, same technique).
+    weight_ema_decay: float = 0.999
 
 
 @dataclass(frozen=True)

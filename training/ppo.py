@@ -20,6 +20,7 @@ import optax
 
 from generals.core.observation import Observation
 from training import action_space as asp
+from training import magnet as mg
 from training.memory import MemoryState
 from training.network import PolicyValueNetwork
 
@@ -74,7 +75,16 @@ def _forward_one(net: PolicyValueNetwork, obs: Observation, mem: MemoryState, ac
     logits, value = net(tensor)
     mask = asp.compute_legal_action_mask(obs, build_castles_enabled)
     logprob, entropy = asp.logprob_and_entropy(logits, mask, action_index)
-    return logprob, entropy, value
+
+    # KL(policy || magnet) toward a heuristic "sensible play" prior instead of
+    # a plain entropy bonus toward uniform randomness -- see training/magnet.py.
+    # KL(p||m) = -H(p) - sum(p * log(m)); reusing entropy_coef as the pull
+    # weight (same trick as strakam/AverageJoe's train/ppo.py).
+    log_probs = asp.masked_log_softmax(logits, mask)
+    magnet_dist = mg.expander_magnet(obs, mask)
+    magnet_kl = -entropy - jnp.sum(jnp.exp(log_probs) * jnp.log(magnet_dist + 1e-10))
+
+    return logprob, entropy, value, magnet_kl
 
 
 def make_train_step(optimizer: optax.GradientTransformation, build_castles_enabled: bool):
@@ -85,7 +95,7 @@ def make_train_step(optimizer: optax.GradientTransformation, build_castles_enabl
     only changes at the Stage-D transition) rather than per iteration."""
 
     def loss_fn(net, batch: FlatBatch, clip_eps, value_coef, entropy_coef):
-        logprob, entropy, value = jax.vmap(
+        logprob, entropy, value, magnet_kl = jax.vmap(
             lambda o, m, a: _forward_one(net, o, m, a, build_castles_enabled)
         )(batch.obs, batch.mem, batch.action_index)
 
@@ -95,15 +105,17 @@ def make_train_step(optimizer: optax.GradientTransformation, build_castles_enabl
 
         value_loss = jnp.mean(0.5 * (value - batch.ret) ** 2)
         entropy_bonus = jnp.mean(entropy)
+        magnet_kl_mean = jnp.mean(magnet_kl)
 
-        loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_bonus
+        loss = policy_loss + value_coef * value_loss + entropy_coef * magnet_kl_mean
 
         approx_kl = jnp.mean(batch.old_logprob - logprob)
         clip_frac = jnp.mean((jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32))
 
         metrics = {
             "loss": loss, "policy_loss": policy_loss, "value_loss": value_loss,
-            "entropy": entropy_bonus, "approx_kl": approx_kl, "clip_frac": clip_frac,
+            "entropy": entropy_bonus, "magnet_kl": magnet_kl_mean,
+            "approx_kl": approx_kl, "clip_frac": clip_frac,
         }
         return loss, metrics
 

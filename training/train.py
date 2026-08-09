@@ -135,6 +135,13 @@ def main():
         net = eqx.tree_deserialise_leaves(args.init_net_from, net)
         logger.info(f"warm-started network weights from {args.init_net_from}")
 
+    # Exponential moving average of net's weights, updated every iteration
+    # below -- used for eval/promotion decisions and the frozen Stage-D
+    # reference instead of the raw, currently-being-gradient-updated live
+    # net, to insulate those signals from single-iteration noise. Starts as
+    # a copy of net (also serves as the deserialization template on resume).
+    ema_net = net
+
     optimizer, opt_state = build_optimizer_and_state(net, ppo_cfg)
     league = lg.League(league_dir, league_cfg, net)
 
@@ -165,7 +172,7 @@ def main():
         latest_eval = meta.get("latest_eval_baselines", {})
         latest_vs_random = meta.get("latest_vs_random_winrate", 0.0)
         latest_vs_frozen = meta.get("latest_vs_frozen_winrate", 0.0)
-        net, opt_state = eqx.tree_deserialise_leaves(str(full_ckpt_path), (net, opt_state))
+        net, opt_state, ema_net = eqx.tree_deserialise_leaves(str(full_ckpt_path), (net, opt_state, ema_net))
         league.load_index(league_index_path)
         logger.info(f"resumed: stage_idx={stage_idx} ({cur.STAGES[stage_idx].name}) "
                     f"iters_in_stage={iters_in_stage} global_iteration={global_iteration} "
@@ -204,7 +211,7 @@ def main():
         })
 
     def save_full_checkpoint() -> None:
-        eqx.tree_serialise_leaves(str(full_ckpt_path), (net, opt_state))
+        eqx.tree_serialise_leaves(str(full_ckpt_path), (net, opt_state, ema_net))
         write_json(meta_path, {
             "stage_idx": stage_idx, "iters_in_stage": iters_in_stage,
             "global_iteration": global_iteration,
@@ -314,6 +321,9 @@ def main():
                     net, opt_state, train_step, flat, ek, ppo_cfg.minibatch_size,
                     ppo_cfg.clip_eps, ppo_cfg.value_coef, stage.entropy_coef)
 
+            decay = ppo_cfg.weight_ema_decay
+            ema_net = jax.tree.map(lambda e, c: decay * e + (1 - decay) * c, ema_net, net)
+
             iters_in_stage += 1
             global_iteration += 1
             elapsed = time.time() - iter_t0
@@ -329,7 +339,8 @@ def main():
             append_jsonl(metrics_path, metrics_row)
             logger.info(f"iter {global_iteration} stage={stage.name}({iters_in_stage}) "
                         f"loss={epoch_metrics['loss']:.4f} entropy={epoch_metrics['entropy']:.3f} "
-                        f"kl={epoch_metrics['approx_kl']:.4f} reward={metrics_row['mean_reward']:+.4f} "
+                        f"magnet_kl={epoch_metrics['magnet_kl']:.4f} kl={epoch_metrics['approx_kl']:.4f} "
+                        f"reward={metrics_row['mean_reward']:+.4f} "
                         f"sps={metrics_row['sps']:.0f} time={elapsed:.1f}s")
 
             if global_iteration % league_cfg.full_checkpoint_interval == 0:
@@ -340,8 +351,11 @@ def main():
                 logger.info(f"league snapshot saved: {stage.name}_iter{global_iteration}")
 
             if global_iteration % args.eval_interval == 0:
+                # Eval (and thus promotion decisions) read ema_net, not the
+                # raw live net -- smooths out the iteration-to-iteration
+                # noise that otherwise makes a single eval point unreliable.
                 key, eval_key = jrandom.split(key)
-                latest_eval = eb.evaluate_vs_baselines(env, net, pool, eval_key,
+                latest_eval = eb.evaluate_vs_baselines(env, ema_net, pool, eval_key,
                                                          args.eval_games, stage.build_castles_enabled)
                 latest_vs_random = latest_eval["vs_random"]["winrate"]
                 eval_row = {"ts": time.time(), "iteration": global_iteration, "stage": stage.name,
@@ -349,7 +363,7 @@ def main():
 
                 if stage.promotion_metric == "vs_frozen_checkpoint" and frozen_reference_net is not None:
                     key, fk = jrandom.split(key)
-                    vs_frozen = eb.evaluate_vs_network(env, net, frozen_reference_net, pool, fk,
+                    vs_frozen = eb.evaluate_vs_network(env, ema_net, frozen_reference_net, pool, fk,
                                                         args.eval_games, stage.build_castles_enabled)
                     latest_vs_frozen = vs_frozen["winrate"]
                     eval_row["vs_frozen_checkpoint"] = vs_frozen
@@ -383,9 +397,10 @@ def main():
                 league.add_snapshot(net, stage.name, global_iteration)
 
                 if stage_idx == _FROZEN_REFERENCE_STAGE_IDX:
-                    eqx.tree_serialise_leaves(str(frozen_ref_path), net)
-                    frozen_reference_net = net
-                    logger.info("saved frozen Stage-C reference checkpoint for Stage D's promotion metric")
+                    eqx.tree_serialise_leaves(str(frozen_ref_path), ema_net)
+                    frozen_reference_net = ema_net
+                    logger.info("saved frozen Stage-C reference checkpoint (EMA weights) "
+                                "for Stage D's promotion metric")
 
                 prev_stage_name = stage.name
                 stage_idx = min(stage_idx + 1, len(cur.STAGES) - 1)
