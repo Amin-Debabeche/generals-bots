@@ -1,0 +1,88 @@
+"""Single source of tunables for the training pipeline.
+
+Nothing in this module may ever set `jax.config.update("jax_enable_x64", True)`
+or otherwise enable float64 — the exported bot does numpy-only float32
+inference, and a silent float32/float64 mismatch is a real parity risk (see
+training/export.py's parity check).
+"""
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class NetworkConfig:
+    """Fixed network geometry. `grid_size` matches the competition pad_to=21
+    so the network never resizes across curriculum stages."""
+    grid_size: int = 21
+    # 14 from Observation.as_tensor() + 5 hand-crafted memory channels
+    # (training/memory.py, per arXiv:2507.06825) -- changing this breaks
+    # compatibility with any checkpoint trained under a different value.
+    in_channels: int = 19
+    backbone_channels: tuple[int, ...] = (48, 64, 64, 64, 48)
+    kernel_size: int = 3
+    value_hidden: int = 64
+    # Per-cell action kinds: 4 directions x {all-in, half} + 1 build = 9
+    num_cell_actions: int = 9
+
+
+@dataclass(frozen=True)
+class PPOConfig:
+    num_envs: int = 512
+    num_steps: int = 256
+    # 1 epoch, not the more common 2-4: measured directly on this machine, the
+    # PPO update (not rollout collection) dominates iteration wall-clock at
+    # ~55s/epoch for a 256envx256step batch — with a 131072-sample batch at
+    # the real 512-env default, 1 epoch already keeps iterations in the
+    # ~1-1.5min range the training budget assumes; more epochs trades
+    # iteration count (more distinct experience over a long run) for more
+    # gradient steps per batch, and iteration count matters more here.
+    num_epochs: int = 1
+    minibatch_size: int = 1024
+    gamma: float = 0.998
+    lam: float = 0.95
+    clip_eps: float = 0.2
+    value_coef: float = 0.5
+    entropy_coef: float = 0.01  # overridden per-stage by curriculum.py
+    max_grad_norm: float = 0.5
+    learning_rate: float = 3e-4
+    # Weight on the contact-distance potential-based shaping term (see
+    # training/rewards.py) added after Stage C showed zero wins across 347
+    # iterations -- composite_reward_fn alone gives no signal toward finding
+    # and closing on the opponent, which matters once that's a genuine
+    # multi-hundred-turn campaign rather than a small-board skirmish.
+    contact_shaping_weight: float = 0.15
+
+
+@dataclass(frozen=True)
+class LeagueConfig:
+    snapshot_interval: int = 50  # iterations between league snapshots
+    full_checkpoint_interval: int = 20  # iterations between resume-checkpoints
+    winrate_floor: float = 0.1
+    winrate_ceil: float = 0.9
+    uniform_floor: float = 0.2  # fraction of opponent draws that ignore PFSP weighting
+    ema_alpha: float = 0.1  # exponential-moving-average rate for per-member win-rate
+
+
+# Normalization constants applied to Observation.as_tensor() channels before
+# they reach the network. Serialized verbatim into weights_meta.json at
+# export time so the numpy inference agent never hand-copies these literals.
+NORMALIZATION = {
+    "log1p_channels": (0, 10, 12),      # armies, owned_army_count, opponent_army_count
+    "land_scale_channels": (9, 11),      # owned_land_count, opponent_land_count
+    "land_scale": 441.0,                 # 21*21
+    "timestep_channel": 13,
+    "timestep_scale": 1200.0,            # competition truncation
+}
+
+# Observation.as_tensor() channel order (see generals/core/observation.py docstring):
+# 0 armies, 1 generals, 2 castles, 3 mountains, 4 neutral_cells, 5 owned_cells,
+# 6 opponent_cells, 7 fog_cells, 8 structures_in_fog, 9 owned_land_count,
+# 10 owned_army_count, 11 opponent_land_count, 12 opponent_army_count, 13 timestep
+CH_ARMIES = 0
+CH_GENERALS = 1
+CH_CASTLES = 2
+CH_MOUNTAINS = 3
+CH_NEUTRAL = 4
+CH_OWNED = 5
+CH_OPPONENT = 6
+CH_FOG = 7
+CH_STRUCT_IN_FOG = 8

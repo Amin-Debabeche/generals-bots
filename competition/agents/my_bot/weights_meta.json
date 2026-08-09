@@ -1,0 +1,19 @@
+{
+  "grid_size": 21,
+  "in_channels": 14,
+  "num_cell_actions": 9,
+  "normalization": {
+    "log1p_channels": [
+      0,
+      10,
+      12
+    ],
+    "land_scale_channels": [
+      9,
+      11
+    ],
+    "land_scale": 441.0,
+    "timestep_channel": 13,
+    "timestep_scale": 1200.0
+  }
+}

@@ -176,3 +176,14 @@ competition/agents/*/target/
 # local research artifacts
 figures/
 uv.lock
+
+# RL training runs (checkpoints, logs, metrics) -- large and machine-specific,
+# never something to commit. See training/train.py.
+training/runs/
+
+# macOS
+.DS_Store
+
+# packaged submission bundle -- regenerate from competition/agents/my_bot/,
+# never commit the zip itself
+competition/agents/my_bot.zip
