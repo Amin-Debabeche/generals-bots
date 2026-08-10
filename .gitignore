@@ -185,5 +185,6 @@ training/runs/
 .DS_Store
 
 # packaged submission bundle -- regenerate from competition/agents/my_bot/,
-# never commit the zip itself
-competition/agents/my_bot.zip
+# never commit the zip itself (glob also catches Finder's numbered duplicates
+# like "my_bot 2.zip" when a same-named file already exists)
+competition/agents/my_bot*.zip
