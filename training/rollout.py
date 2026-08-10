@@ -117,7 +117,7 @@ def _chunk_sizes(total_steps: int, chunk_steps: int) -> list[int]:
 @partial(jax.jit, static_argnames=("env", "chunk_steps", "build_castles_enabled"))
 def _selfplay_chunk(env, states, mem0, mem1, pool, live_net, opp_net, key,
                      chunk_steps: int, build_castles_enabled: bool,
-                     gamma: float, contact_shaping_weight: float):
+                     gamma: float, contact_shaping_weight: float, general_safety_weight: float):
     get_obs = _get_obs_fn(env)
 
     def step_fn(carry, key_t):
@@ -143,7 +143,7 @@ def _selfplay_chunk(env, states, mem0, mem1, pool, live_net, opp_net, key,
         obs0_after = jax.vmap(lambda s: get_obs(s, 0))(timesteps.last_state)
         obs1_after = jax.vmap(lambda s: get_obs(s, 1))(timesteps.last_state)
         reward0 = jax.vmap(
-            lambda po, a, o: shaped_reward_fn(po, a, o, gamma, contact_shaping_weight)
+            lambda po, a, o: shaped_reward_fn(po, a, o, gamma, contact_shaping_weight, general_safety_weight)
         )(obs0, action0, obs0_after)
         done0 = timesteps.terminated | timesteps.truncated
         winner0 = timesteps.info.winner
@@ -166,7 +166,7 @@ def _selfplay_chunk(env, states, mem0, mem1, pool, live_net, opp_net, key,
 @partial(jax.jit, static_argnames=("env", "heuristic_agent", "chunk_steps", "build_castles_enabled"))
 def _vs_heuristic_chunk(env, states, mem0, pool, live_net, heuristic_agent, key,
                          chunk_steps: int, build_castles_enabled: bool,
-                         gamma: float, contact_shaping_weight: float):
+                         gamma: float, contact_shaping_weight: float, general_safety_weight: float):
     get_obs = _get_obs_fn(env)
 
     def step_fn(carry, key_t):
@@ -189,7 +189,7 @@ def _vs_heuristic_chunk(env, states, mem0, pool, live_net, heuristic_agent, key,
 
         obs0_after = jax.vmap(lambda s: get_obs(s, 0))(timesteps.last_state)
         reward0 = jax.vmap(
-            lambda po, a, o: shaped_reward_fn(po, a, o, gamma, contact_shaping_weight)
+            lambda po, a, o: shaped_reward_fn(po, a, o, gamma, contact_shaping_weight, general_safety_weight)
         )(obs0, action0, obs0_after)
         done0 = timesteps.terminated | timesteps.truncated
         winner0 = timesteps.info.winner
@@ -209,7 +209,7 @@ def _vs_heuristic_chunk(env, states, mem0, pool, live_net, heuristic_agent, key,
 
 def collect_selfplay_rollout(env, states, mem0, mem1, pool, live_net, opp_net, key,
                               num_steps: int, build_castles_enabled: bool,
-                              gamma: float, contact_shaping_weight: float):
+                              gamma: float, contact_shaping_weight: float, general_safety_weight: float):
     """seat 0 = live_net (trainable), seat 1 = opp_net (frozen params of the
     same architecture — either live_net again for true self-play, or a
     sampled league checkpoint's params). `mem0`/`mem1` are this bucket's
@@ -225,7 +225,7 @@ def collect_selfplay_rollout(env, states, mem0, mem1, pool, live_net, opp_net, k
         key, chunk_key = jrandom.split(key)
         states, mem0, mem1, traj = _selfplay_chunk(
             env, states, mem0, mem1, pool, live_net, opp_net, chunk_key,
-            size, build_castles_enabled, gamma, contact_shaping_weight,
+            size, build_castles_enabled, gamma, contact_shaping_weight, general_safety_weight,
         )
         chunks.append(traj)
 
@@ -237,7 +237,7 @@ def collect_selfplay_rollout(env, states, mem0, mem1, pool, live_net, opp_net, k
 
 def collect_vs_heuristic_rollout(env, states, mem0, pool, live_net, heuristic_agent, key,
                                   num_steps: int, build_castles_enabled: bool,
-                                  gamma: float, contact_shaping_weight: float):
+                                  gamma: float, contact_shaping_weight: float, general_safety_weight: float):
     """seat 0 = live_net (trainable), seat 1 = a pure-JAX heuristic Agent
     (e.g. RandomAgent()/ExpanderAgent()/HunterAgent() — reused across calls
     so it hits the jit cache; a fresh instance each call would recompile).
@@ -252,7 +252,7 @@ def collect_vs_heuristic_rollout(env, states, mem0, pool, live_net, heuristic_ag
         key, chunk_key = jrandom.split(key)
         states, mem0, traj = _vs_heuristic_chunk(
             env, states, mem0, pool, live_net, heuristic_agent, chunk_key,
-            size, build_castles_enabled, gamma, contact_shaping_weight,
+            size, build_castles_enabled, gamma, contact_shaping_weight, general_safety_weight,
         )
         chunks.append(traj)
 

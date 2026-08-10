@@ -276,12 +276,12 @@ def main():
                     states, mem0, traj, boot = ro.collect_vs_heuristic_rollout(
                         env, states, mem0, pool, net, HEURISTIC_AGENTS[name], roll_key,
                         ppo_cfg.num_steps, stage.build_castles_enabled,
-                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight)
+                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight, ppo_cfg.general_safety_weight)
                 elif name == "selfplay_current":
                     states, mem0, mem1, traj, boot = ro.collect_selfplay_rollout(
                         env, states, mem0, mem1, pool, net, net, roll_key,
                         ppo_cfg.num_steps, stage.build_castles_enabled,
-                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight)
+                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight, ppo_cfg.general_safety_weight)
                 elif name == "selfplay_league":
                     key, sample_key = jrandom.split(key)
                     member, opp_params = league.sample_opponent(sample_key)
@@ -289,7 +289,7 @@ def main():
                     states, mem0, mem1, traj, boot = ro.collect_selfplay_rollout(
                         env, states, mem0, mem1, pool, net, opp_params, roll_key,
                         ppo_cfg.num_steps, stage.build_castles_enabled,
-                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight)
+                        ppo_cfg.gamma, ppo_cfg.contact_shaping_weight, ppo_cfg.general_safety_weight)
                 else:
                     continue
 

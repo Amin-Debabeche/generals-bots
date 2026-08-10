@@ -50,6 +50,12 @@ class PPOConfig:
     # and closing on the opponent, which matters once that's a genuine
     # multi-hundred-turn campaign rather than a small-board skirmish.
     contact_shaping_weight: float = 0.15
+    # Weight on the general-safety potential-based shaping term (see
+    # training/rewards.py) -- added after real generals.bot leaderboard
+    # replays showed the bot repeatedly leading on land/army against several
+    # opponents right up to the second-to-last tick, then losing everything
+    # in one turn to an undefended general.
+    general_safety_weight: float = 0.2
     # Exponential moving average of network weights, updated every iteration
     # (see training/train.py's ema_net) and used for eval/promotion decisions
     # and as the frozen Stage-D reference -- insulates those signals from

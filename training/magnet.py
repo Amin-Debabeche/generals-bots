@@ -23,6 +23,14 @@ import jax.numpy as jnp
 from generals.core.observation import Observation
 from training.action_space import NUM_CELL_ACTIONS
 
+# Mirrors generals/agents/hunter_agent.py's own GARRISON=4 (kept on its
+# general; only surplus above 2x that is ever sent out) and
+# training/rewards.py's _general_safety_potential -- added for the same
+# reason (see that module's docstring): real leaderboard replays showed the
+# bot repeatedly leading on economy right up to the second-to-last tick, then
+# losing everything in one turn to an undefended general.
+GARRISON = 4
+
 
 def _dest(arr: jnp.ndarray) -> jnp.ndarray:
     """(H, W) -> (H, W, 4): value at the destination cell of each of the 4
@@ -48,6 +56,7 @@ def expander_magnet(
     score_build: float = 2.0,
     score_topk: float = 2.0,
     topk: int = 5,
+    score_garrison_penalty: float = -2.0,
 ) -> jnp.ndarray:
     """(H*W*9 + 1,) probability distribution favoring expansion and capture --
     same shape/layout as the network's flat action logits
@@ -82,6 +91,16 @@ def expander_magnet(
     top_thresh = jax.lax.sort(own_army.reshape(-1), is_stable=False)[-topk]
     is_top = (own_army >= top_thresh) & (own_army > 0)
     dir_scores = dir_scores + is_top[..., None] * score_topk
+
+    # Discourage emptying the general's own cell before it holds a surplus
+    # (GARRISON below) -- a soft pull toward keeping a home defense, mirroring
+    # Hunter's own garrison-then-feed-the-surplus behavior, rather than a hard
+    # mask (an under-defended general with no other legal move should still
+    # be able to move at all).
+    own_general = obs.generals & obs.owned_cells
+    gen_army = jnp.sum(jnp.where(own_general, own_army, 0))
+    has_surplus = gen_army >= 2 * GARRISON
+    dir_scores = dir_scores + (own_general & ~has_surplus)[..., None] * score_garrison_penalty
 
     build_scores = jnp.full((H, W, 1), score_build)
     cell_scores = jnp.concatenate([dir_scores, dir_scores, build_scores], axis=-1)  # (H, W, 9)
