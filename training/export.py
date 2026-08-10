@@ -70,14 +70,40 @@ def parse_args():
 
 
 def load_net(checkpoint_path: str, net_cfg: NetworkConfig) -> PolicyValueNetwork:
+    """Tries, in order: (net, opt_state, ema_net) -- training/train.py's
+    current latest_full.eqx format, returns ema_net (the smoothed weights
+    meant for eval/deployment, not the raw currently-being-gradient-updated
+    live net); legacy (net, opt_state) full checkpoint (pre-EMA runs);
+    network-only (a league snapshot or a pretrain_bc.py output).
+
+    Order matters and is NOT arbitrary: eqx.tree_deserialise_leaves reads a
+    flat, sequential leaf stream, so a template with FEWER leaves than the
+    file silently "succeeds" by reading a truncated prefix -- confirmed
+    empirically, a bare-network template against a 3-tuple checkpoint file
+    returns the live net with no error, silently discarding ema_net. A
+    template with MORE leaves than the file correctly raises instead
+    (confirmed too). So the most-specific (largest) template must be tried
+    first, falling back to smaller ones -- never the reverse."""
     template = PolicyValueNetwork(jrandom.PRNGKey(0), net_cfg)
+    optimizer, opt_state = build_optimizer_and_state(template, PPOConfig())
+
     try:
-        return eqx.tree_deserialise_leaves(checkpoint_path, template)
+        _net, _opt_state, ema_net = eqx.tree_deserialise_leaves(
+            checkpoint_path, (template, opt_state, template))
+        print("loaded full (net, opt_state, ema_net) checkpoint -- exporting ema_net")
+        return ema_net
     except Exception:
         pass
-    optimizer, opt_state = build_optimizer_and_state(template, PPOConfig())
-    net, _ = eqx.tree_deserialise_leaves(checkpoint_path, (template, opt_state))
-    return net
+
+    try:
+        net, _opt_state = eqx.tree_deserialise_leaves(checkpoint_path, (template, opt_state))
+        print("loaded legacy full (net, opt_state) checkpoint -- no EMA available, exporting live net")
+        return net
+    except Exception:
+        pass
+
+    print("loaded network-only checkpoint")
+    return eqx.tree_deserialise_leaves(checkpoint_path, template)
 
 
 def extract_weights(net: PolicyValueNetwork) -> dict:

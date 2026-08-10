@@ -1,6 +1,6 @@
 {
   "grid_size": 21,
-  "in_channels": 14,
+  "in_channels": 19,
   "num_cell_actions": 9,
   "normalization": {
     "log1p_channels": [
