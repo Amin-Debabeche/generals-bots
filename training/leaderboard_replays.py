@@ -184,9 +184,25 @@ def reconstruct_game(replay: dict, max_ticks: int | None = None):
 def collect_bc_samples(reconstructed, elite_seats: set[int]):
     """reconstructed: output of reconstruct_game. Tracks memory continuously
     for BOTH seats (same reasoning as training/human_replays.py) but only
-    yields samples for seats in `elite_seats`."""
+    yields samples for seats in `elite_seats`.
+
+    Drops any sample whose target action is illegal under
+    action_space.compute_legal_action_mask(obs, build_castles_enabled=False)
+    -- the same convention training/pretrain_bc.py's loss function assumes.
+    Rare (~0.1% of ticks in practice) but real: found by tracing an
+    anomalously huge BC training loss back to exactly these samples, all of
+    which showed a *visible* (non-fogged) mountain at the reconstructed
+    move's destination despite the move having actually succeeded when
+    verified against the real engine during reconstruction -- root cause not
+    fully pinned down (a rare reconstruction ambiguity picking a
+    board-matching but not-the-true candidate is the leading guess), but
+    filtering here is the same defensive move training/human_replays.py
+    already makes for its own illegal-move edge cases, and keeps a single
+    corrupted sample from ever contributing a ~1e9 loss spike mid-training
+    again."""
     mem = {0: mem_mod.init_memory(CANVAS, CANVAS), 1: mem_mod.init_memory(CANVAS, CANVAS)}
     samples = []
+    num_illegal = 0
     actions_by_seat = {0: PASS_ACTION, 1: PASS_ACTION}
 
     for state, a0, a1 in reconstructed:
@@ -196,6 +212,10 @@ def collect_bc_samples(reconstructed, elite_seats: set[int]):
                 continue
             obs = _pad_observation(game.get_observation(state, p))
             idx = int(asp.encode_action_index(jnp.asarray(actions_by_seat[p]), CANVAS, CANVAS))
+            mask = asp.compute_legal_action_mask(obs, build_castles_enabled=False)
+            if not bool(mask[idx]):
+                num_illegal += 1
+                continue
             samples.append((obs, mem[p], idx))
 
         new_state, _info = game.step(state, jnp.stack([jnp.asarray(a0), jnp.asarray(a1)]))
@@ -203,7 +223,7 @@ def collect_bc_samples(reconstructed, elite_seats: set[int]):
             obs_after = _pad_observation(game.get_observation(new_state, p))
             mem[p] = mem_mod.update_memory(mem[p], obs_after, jnp.asarray(actions_by_seat[p]))
 
-    return samples
+    return samples, num_illegal
 
 
 def _pad_observation(obs, canvas: int = CANVAS):
@@ -266,7 +286,7 @@ def main():
         game_ids = game_ids[:args.max_games]
 
     all_samples = []
-    total_matched, total_ticks = 0, 0
+    total_matched, total_ticks, total_illegal = 0, 0, 0
     games_used = 0
     for i, gid in enumerate(game_ids):
         m = games_by_id[gid]
@@ -291,8 +311,9 @@ def main():
         total_ticks += stats["total"]
         games_used += 1
 
-        samples = collect_bc_samples(reconstructed, elite_seats)
+        samples, num_illegal = collect_bc_samples(reconstructed, elite_seats)
         all_samples.extend(samples)
+        total_illegal += num_illegal
 
         if (i + 1) % 20 == 0 or i == len(game_ids) - 1:
             rate = total_matched / max(total_ticks, 1) * 100
@@ -302,7 +323,7 @@ def main():
 
     print(f"\nDone: {games_used} games, {len(all_samples)} samples, "
           f"tick reconstruction rate {total_matched / max(total_ticks, 1) * 100:.1f}% "
-          f"({total_matched}/{total_ticks})")
+          f"({total_matched}/{total_ticks}), {total_illegal} illegal-target samples dropped")
 
     from generals.core.observation import Observation
     obs_fields = Observation._fields
