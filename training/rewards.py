@@ -56,7 +56,7 @@ def _contact_potential(obs: Observation) -> jnp.ndarray:
     return jnp.where(has_owned & has_enemy, -norm_dist, -1.0)
 
 
-GARRISON_FRACTION = 0.12
+GARRISON_FRACTION = 0.25
 MIN_GARRISON = 4.0
 
 
@@ -72,11 +72,20 @@ def _general_safety_potential(obs: Observation) -> jnp.ndarray:
     gradual strategic outplay. Neither composite_reward_fn nor
     training/magnet.py's expander_magnet had any defensive concept, only
     expansion/capture -- this term is meant to close that specific gap.
-    `GARRISON_FRACTION`/`MIN_GARRISON` mirror generals/agents/hunter_agent.py's
-    own `GARRISON = 4` (kept on its general; only surplus above 2x that is
-    ever sent out) -- Hunter already defends this way, so this potential
-    points the trained policy toward a similarly-sized home reserve, not a
-    made-up one."""
+
+    GARRISON_FRACTION raised 0.12 -> 0.25 after direct behavioral inspection
+    (main9 checkpoint, real vs-Hunter games): losses consistently showed a
+    garrison under ~12% of total army (essentially just passive
+    structure-growth, no active reinforcement at all) even though the
+    original 0.12 target was already that low, while a game that survived
+    to truncation had the garrison fraction climb to 27-29%. 0.12 (mirroring
+    Hunter's own fixed GARRISON=4) was calibrated to Hunter's own, much
+    smaller, army scale -- once total army reaches the hundreds (routine by
+    midgame here), a fixed-fraction target that small stops being a
+    meaningful defensive reserve. See also general_safety_weight in
+    training/config.py, raised alongside this after the same inspection
+    showed the *pull* toward even the old target was too weak to move
+    behavior at all."""
     own_general = obs.generals & obs.owned_cells
     gen_army = jnp.sum(jnp.where(own_general, obs.armies, 0)).astype(jnp.float32)
     target = jnp.maximum(GARRISON_FRACTION * obs.owned_army_count.astype(jnp.float32), MIN_GARRISON)

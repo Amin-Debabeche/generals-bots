@@ -55,7 +55,17 @@ class PPOConfig:
     # replays showed the bot repeatedly leading on land/army against several
     # opponents right up to the second-to-last tick, then losing everything
     # in one turn to an undefended general.
-    general_safety_weight: float = 0.2
+    # Raised 0.2 -> 0.8: at 0.2, direct behavioral inspection (main9, real
+    # vs-Hunter games) showed the general's own army barely rising above
+    # passive structure growth -- the pull was too weak to change behavior at
+    # all, not just insufficient. A Hunter-imitation BC refinement was tried
+    # as an alternative fix and rejected: it improved garrison behavior in
+    # some games but measurably regressed overall play (vs_random 90s%->59%,
+    # vs_hunter itself 60-86%->31%) by pulling the whole policy toward
+    # Hunter's simpler overall style, not just its defensive habit --
+    # escalating this weight instead keeps the RL objective in charge of
+    # everything except the one specific behavior being nudged.
+    general_safety_weight: float = 0.8
     # Exponential moving average of network weights, updated every iteration
     # (see training/train.py's ema_net) and used for eval/promotion decisions
     # and as the frozen Stage-D reference -- insulates those signals from
