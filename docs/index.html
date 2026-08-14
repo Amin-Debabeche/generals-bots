@@ -1,0 +1,495 @@
+<title>Stage D Campaign Log</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --page:        #f2f2ef;
+    --surface-1:   #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:        #e1e0d9;
+    --baseline:    #c3c2b7;
+    --border:      rgba(11,11,11,0.10);
+    --accent:      #2d3f6b;
+    --accent-soft: #e7eaf2;
+    --series-random:   #2a78d6;
+    --series-expander: #eb6834;
+    --series-hunter:   #1baf7a;
+    --status-good:     #0ca30c;
+    --status-warn:     #b8860b;
+    --status-crit:     #d03b3b;
+    --status-good-bg:  #e4f5e4;
+    --status-warn-bg:  #faf1db;
+    --status-crit-bg:  #fbe7e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --page:        #0d0d0d;
+      --surface-1:   #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:        #2c2c2a;
+      --baseline:    #383835;
+      --border:      rgba(255,255,255,0.10);
+      --accent:      #8ea1d6;
+      --accent-soft: #202a42;
+      --series-random:   #3987e5;
+      --series-expander: #d95926;
+      --series-hunter:   #199e70;
+      --status-good:     #0ca30c;
+      --status-warn:     #d9a91a;
+      --status-crit:     #e66767;
+      --status-good-bg:  #123312;
+      --status-warn-bg:  #332c12;
+      --status-crit-bg:  #331616;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface-1:   #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --border:      rgba(255,255,255,0.10);
+    --accent:      #8ea1d6;
+    --accent-soft: #202a42;
+    --series-random:   #3987e5;
+    --series-expander: #d95926;
+    --series-hunter:   #199e70;
+    --status-good:     #0ca30c;
+    --status-warn:     #d9a91a;
+    --status-crit:     #e66767;
+    --status-good-bg:  #123312;
+    --status-warn-bg:  #332c12;
+    --status-crit-bg:  #331616;
+  }
+
+  .viz-root {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 0 0 64px;
+  }
+  .viz-root * { box-sizing: border-box; }
+  .num { font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+  /* ---------- header ---------- */
+  header.page-head {
+    padding: 56px 0 36px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: 40px;
+    line-height: 1.08;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    margin: 0 0 16px;
+    text-wrap: balance;
+    max-width: 15ch;
+  }
+  .dek {
+    font-size: 16.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    max-width: 62ch;
+    margin: 0;
+  }
+  .dek b { color: var(--text-primary); font-weight: 650; }
+
+  /* ---------- status strip ---------- */
+  .status-strip {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    margin-top: 32px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border);
+  }
+  .stat { min-width: 130px; }
+  .stat .k {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .stat .v {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .stat .v .unit { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
+
+  /* ---------- legend ---------- */
+  .legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 0 0 28px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .legend .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+
+  /* ---------- chapter grid ---------- */
+  .chapters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 18px;
+  }
+  .chapter {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 20px 16px;
+    position: relative;
+  }
+  .chapter-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .chapter-title {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .chapter-title .run-id { color: var(--accent); }
+  .chapter-note {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin: 4px 0 14px;
+    min-height: 38px;
+  }
+  .pill {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 3px 8px;
+    border-radius: 100px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .pill.good { color: var(--status-good); background: var(--status-good-bg); }
+  .pill.warn { color: var(--status-warn); background: var(--status-warn-bg); }
+  .pill.crit { color: var(--status-crit); background: var(--status-crit-bg); }
+
+  .chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .axis-label { font-size: 9.5px; fill: var(--text-muted); }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .series-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .series-dot { stroke: var(--surface-1); stroke-width: 2; }
+  .end-label { font-size: 11px; font-weight: 700; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+
+  .hover-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0; pointer-events: none; }
+  .hover-catch { fill: transparent; cursor: crosshair; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--text-primary);
+    color: var(--page);
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    border-radius: 6px;
+    opacity: 0;
+    transform: translate(-50%, -100%);
+    white-space: nowrap;
+    z-index: 5;
+    transition: opacity 0.08s ease;
+  }
+  .tooltip .tt-row { display: flex; align-items: center; gap: 6px; }
+  .tooltip .tt-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .tooltip .tt-iter { font-weight: 700; margin-bottom: 3px; opacity: 0.85; }
+
+  /* ---------- table ---------- */
+  details.table-toggle {
+    margin-top: 36px;
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+  }
+  summary {
+    cursor: pointer;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    list-style: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary:before { content: "▸ "; color: var(--accent); }
+  details[open] summary:before { content: "▾ "; }
+  .table-scroll { overflow-x: auto; margin-top: 16px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 12.5px;
+    min-width: 640px;
+  }
+  th, td {
+    text-align: left;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  td.num { text-align: right; }
+  tr.run-sep td { border-top: 2px solid var(--border); }
+  .run-cell { color: var(--accent); font-weight: 700; }
+
+  footer.note {
+    margin-top: 40px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    max-width: 70ch;
+  }
+
+  a { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    h1 { font-size: 30px; }
+    header.page-head { padding-top: 36px; }
+  }
+</style>
+
+<div class="viz-root">
+  <div class="wrap">
+    <header class="page-head">
+      <p class="eyebrow">Training Log &middot; Stage D &middot; Castle-Building Ruleset</p>
+      <h1>Seven attempts to stop the general&#8209;sniping loss</h1>
+      <p class="dek">
+        Each panel below is one full restart of Stage D self&#8209;play, all measured on
+        the same axis &mdash; win rate against three fixed opponents, by iteration
+        <em>since that run began</em>. The throughline: <b>vs_hunter</b> is the hard
+        opponent, because Hunter is the only training opponent that reliably punishes
+        an undefended general the way real ladder opponents do.
+      </p>
+      <div class="status-strip">
+        <div class="stat">
+          <div class="k">Runs logged</div>
+          <div class="v num">7</div>
+        </div>
+        <div class="stat">
+          <div class="k">Current run</div>
+          <div class="v num">main11</div>
+        </div>
+        <div class="stat">
+          <div class="k">Best vs_hunter (any run)</div>
+          <div class="v num">86<span class="unit">% &middot; main9 @ iter 120</span></div>
+        </div>
+        <div class="stat">
+          <div class="k">main11 latest vs_hunter</div>
+          <div class="v num">61<span class="unit">% &middot; iter 280, climbing</span></div>
+        </div>
+      </div>
+    </header>
+
+    <div class="legend">
+      <span class="item"><span class="swatch" style="background:var(--series-random)"></span>vs Random</span>
+      <span class="item"><span class="swatch" style="background:var(--series-expander)"></span>vs Expander</span>
+      <span class="item"><span class="swatch" style="background:var(--series-hunter)"></span>vs Hunter &mdash; the contested one</span>
+    </div>
+
+    <div class="chapters" id="chapters"></div>
+
+    <details class="table-toggle">
+      <summary>Show full eval data as a table</summary>
+      <div class="table-scroll">
+        <table id="data-table">
+          <thead>
+            <tr><th>Run</th><th>Iteration</th><th class="num">vs Random</th><th class="num">vs Expander</th><th class="num">vs Hunter</th></tr>
+          </thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </details>
+
+    <footer class="note">
+      X-axis is iterations <em>into Stage D for that run</em>, not global training time &mdash;
+      each run restarts the counter, since every run here is a fresh Stage-D launch warm-started
+      from a different checkpoint. Eval points are 64-game batches against each opponent, sampled
+      every 20 iterations, played greedily against the EMA-smoothed weights (main7 onward) or the
+      live weights (main5&ndash;main6, before EMA was added).
+    </footer>
+  </div>
+</div>
+
+<script>
+(function () {
+  const DATA = {"main5": [{"iteration": 20, "vs_random": 0.453125, "vs_expander": 0.484375, "vs_hunter": 0.375}, {"iteration": 40, "vs_random": 0.640625, "vs_expander": 0.453125, "vs_hunter": 0.5625}, {"iteration": 60, "vs_random": 0.796875, "vs_expander": 0.625, "vs_hunter": 0.546875}, {"iteration": 80, "vs_random": 0.359375, "vs_expander": 0.21875, "vs_hunter": 0.296875}, {"iteration": 100, "vs_random": 0.296875, "vs_expander": 0.25, "vs_hunter": 0.15625}, {"iteration": 120, "vs_random": 0.265625, "vs_expander": 0.25, "vs_hunter": 0.15625}, {"iteration": 140, "vs_random": 0.359375, "vs_expander": 0.125, "vs_hunter": 0.203125}], "main6": [{"iteration": 20, "vs_random": 0.671875, "vs_expander": 0.578125, "vs_hunter": 0.375}, {"iteration": 40, "vs_random": 0.328125, "vs_expander": 0.375, "vs_hunter": 0.203125}, {"iteration": 60, "vs_random": 0.3125, "vs_expander": 0.203125, "vs_hunter": 0.1875}, {"iteration": 80, "vs_random": 0.328125, "vs_expander": 0.21875, "vs_hunter": 0.140625}, {"iteration": 100, "vs_random": 0.375, "vs_expander": 0.140625, "vs_hunter": 0.171875}, {"iteration": 120, "vs_random": 0.15625, "vs_expander": 0.125, "vs_hunter": 0.140625}, {"iteration": 140, "vs_random": 0.203125, "vs_expander": 0.109375, "vs_hunter": 0.125}, {"iteration": 160, "vs_random": 0.21875, "vs_expander": 0.0625, "vs_hunter": 0.109375}, {"iteration": 180, "vs_random": 0.1875, "vs_expander": 0.078125, "vs_hunter": 0.015625}, {"iteration": 200, "vs_random": 0.203125, "vs_expander": 0.0625, "vs_hunter": 0.078125}], "main7": [{"iteration": 20, "vs_random": 0.890625, "vs_expander": 0.796875, "vs_hunter": 0.578125}, {"iteration": 40, "vs_random": 0.84375, "vs_expander": 0.875, "vs_hunter": 0.734375}, {"iteration": 60, "vs_random": 0.859375, "vs_expander": 0.71875, "vs_hunter": 0.59375}, {"iteration": 80, "vs_random": 0.859375, "vs_expander": 0.796875, "vs_hunter": 0.625}, {"iteration": 100, "vs_random": 0.828125, "vs_expander": 0.71875, "vs_hunter": 0.59375}, {"iteration": 120, "vs_random": 0.875, "vs_expander": 0.796875, "vs_hunter": 0.640625}, {"iteration": 140, "vs_random": 0.875, "vs_expander": 0.71875, "vs_hunter": 0.609375}, {"iteration": 160, "vs_random": 0.90625, "vs_expander": 0.828125, "vs_hunter": 0.6875}, {"iteration": 180, "vs_random": 0.890625, "vs_expander": 0.890625, "vs_hunter": 0.703125}, {"iteration": 200, "vs_random": 0.9375, "vs_expander": 0.84375, "vs_hunter": 0.78125}, {"iteration": 220, "vs_random": 0.890625, "vs_expander": 0.796875, "vs_hunter": 0.703125}, {"iteration": 240, "vs_random": 0.90625, "vs_expander": 0.875, "vs_hunter": 0.6875}, {"iteration": 260, "vs_random": 0.84375, "vs_expander": 0.90625, "vs_hunter": 0.609375}, {"iteration": 280, "vs_random": 0.921875, "vs_expander": 0.796875, "vs_hunter": 0.703125}, {"iteration": 300, "vs_random": 0.890625, "vs_expander": 0.71875, "vs_hunter": 0.703125}, {"iteration": 320, "vs_random": 0.90625, "vs_expander": 0.78125, "vs_hunter": 0.59375}, {"iteration": 340, "vs_random": 0.890625, "vs_expander": 0.828125, "vs_hunter": 0.625}, {"iteration": 360, "vs_random": 0.921875, "vs_expander": 0.890625, "vs_hunter": 0.65625}], "main8": [{"iteration": 20, "vs_random": 0.90625, "vs_expander": 0.875, "vs_hunter": 0.703125}, {"iteration": 40, "vs_random": 0.828125, "vs_expander": 0.90625, "vs_hunter": 0.609375}, {"iteration": 60, "vs_random": 0.890625, "vs_expander": 0.78125, "vs_hunter": 0.5625}, {"iteration": 80, "vs_random": 0.890625, "vs_expander": 0.9375, "vs_hunter": 0.6875}, {"iteration": 100, "vs_random": 0.921875, "vs_expander": 0.8125, "vs_hunter": 0.609375}, {"iteration": 120, "vs_random": 0.890625, "vs_expander": 0.8125, "vs_hunter": 0.609375}, {"iteration": 140, "vs_random": 0.9375, "vs_expander": 0.78125, "vs_hunter": 0.671875}, {"iteration": 160, "vs_random": 0.890625, "vs_expander": 0.890625, "vs_hunter": 0.65625}, {"iteration": 180, "vs_random": 0.953125, "vs_expander": 0.90625, "vs_hunter": 0.640625}, {"iteration": 200, "vs_random": 0.96875, "vs_expander": 0.84375, "vs_hunter": 0.71875}, {"iteration": 220, "vs_random": 0.9375, "vs_expander": 0.890625, "vs_hunter": 0.71875}, {"iteration": 240, "vs_random": 0.921875, "vs_expander": 0.828125, "vs_hunter": 0.625}, {"iteration": 260, "vs_random": 0.984375, "vs_expander": 0.90625, "vs_hunter": 0.609375}], "main9": [{"iteration": 20, "vs_random": 0.828125, "vs_expander": 0.84375, "vs_hunter": 0.71875}, {"iteration": 40, "vs_random": 0.9375, "vs_expander": 0.90625, "vs_hunter": 0.71875}, {"iteration": 60, "vs_random": 0.953125, "vs_expander": 0.890625, "vs_hunter": 0.703125}, {"iteration": 80, "vs_random": 0.984375, "vs_expander": 0.9375, "vs_hunter": 0.75}, {"iteration": 100, "vs_random": 0.9375, "vs_expander": 0.96875, "vs_hunter": 0.796875}, {"iteration": 120, "vs_random": 0.9375, "vs_expander": 0.9375, "vs_hunter": 0.859375}, {"iteration": 140, "vs_random": 0.90625, "vs_expander": 0.921875, "vs_hunter": 0.78125}, {"iteration": 160, "vs_random": 0.921875, "vs_expander": 0.9375, "vs_hunter": 0.859375}, {"iteration": 180, "vs_random": 0.90625, "vs_expander": 0.90625, "vs_hunter": 0.796875}, {"iteration": 200, "vs_random": 0.96875, "vs_expander": 0.9375, "vs_hunter": 0.828125}, {"iteration": 220, "vs_random": 1.0, "vs_expander": 0.9375, "vs_hunter": 0.765625}, {"iteration": 240, "vs_random": 0.96875, "vs_expander": 0.984375, "vs_hunter": 0.78125}, {"iteration": 260, "vs_random": 0.984375, "vs_expander": 0.9375, "vs_hunter": 0.71875}, {"iteration": 280, "vs_random": 0.9375, "vs_expander": 0.96875, "vs_hunter": 0.828125}, {"iteration": 300, "vs_random": 0.96875, "vs_expander": 0.921875, "vs_hunter": 0.734375}, {"iteration": 320, "vs_random": 0.984375, "vs_expander": 0.953125, "vs_hunter": 0.78125}, {"iteration": 340, "vs_random": 0.890625, "vs_expander": 0.953125, "vs_hunter": 0.734375}, {"iteration": 360, "vs_random": 0.9375, "vs_expander": 0.9375, "vs_hunter": 0.765625}, {"iteration": 380, "vs_random": 0.953125, "vs_expander": 0.9375, "vs_hunter": 0.609375}, {"iteration": 400, "vs_random": 0.9375, "vs_expander": 0.875, "vs_hunter": 0.59375}, {"iteration": 420, "vs_random": 0.96875, "vs_expander": 0.9375, "vs_hunter": 0.65625}, {"iteration": 440, "vs_random": 0.921875, "vs_expander": 0.90625, "vs_hunter": 0.625}, {"iteration": 460, "vs_random": 0.921875, "vs_expander": 0.859375, "vs_hunter": 0.671875}, {"iteration": 480, "vs_random": 0.875, "vs_expander": 0.828125, "vs_hunter": 0.59375}, {"iteration": 500, "vs_random": 0.90625, "vs_expander": 0.734375, "vs_hunter": 0.5}, {"iteration": 520, "vs_random": 0.890625, "vs_expander": 0.765625, "vs_hunter": 0.5625}], "main10": [{"iteration": 20, "vs_random": 0.90625, "vs_expander": 0.796875, "vs_hunter": 0.65625}, {"iteration": 40, "vs_random": 0.90625, "vs_expander": 0.859375, "vs_hunter": 0.515625}, {"iteration": 60, "vs_random": 0.90625, "vs_expander": 0.890625, "vs_hunter": 0.578125}, {"iteration": 80, "vs_random": 0.890625, "vs_expander": 0.890625, "vs_hunter": 0.578125}, {"iteration": 100, "vs_random": 0.921875, "vs_expander": 0.828125, "vs_hunter": 0.546875}, {"iteration": 120, "vs_random": 0.875, "vs_expander": 0.765625, "vs_hunter": 0.65625}, {"iteration": 140, "vs_random": 0.921875, "vs_expander": 0.859375, "vs_hunter": 0.546875}, {"iteration": 160, "vs_random": 0.859375, "vs_expander": 0.875, "vs_hunter": 0.53125}, {"iteration": 180, "vs_random": 0.84375, "vs_expander": 0.890625, "vs_hunter": 0.515625}], "main11": [{"iteration": 20, "vs_random": 0.578125, "vs_expander": 0.59375, "vs_hunter": 0.203125}, {"iteration": 40, "vs_random": 0.546875, "vs_expander": 0.703125, "vs_hunter": 0.390625}, {"iteration": 60, "vs_random": 0.609375, "vs_expander": 0.640625, "vs_hunter": 0.40625}, {"iteration": 80, "vs_random": 0.59375, "vs_expander": 0.8125, "vs_hunter": 0.40625}, {"iteration": 100, "vs_random": 0.75, "vs_expander": 0.546875, "vs_hunter": 0.40625}, {"iteration": 120, "vs_random": 0.609375, "vs_expander": 0.640625, "vs_hunter": 0.40625}, {"iteration": 140, "vs_random": 0.703125, "vs_expander": 0.671875, "vs_hunter": 0.375}, {"iteration": 160, "vs_random": 0.703125, "vs_expander": 0.640625, "vs_hunter": 0.46875}, {"iteration": 180, "vs_random": 0.703125, "vs_expander": 0.796875, "vs_hunter": 0.390625}, {"iteration": 200, "vs_random": 0.6875, "vs_expander": 0.765625, "vs_hunter": 0.5625}, {"iteration": 220, "vs_random": 0.78125, "vs_expander": 0.84375, "vs_hunter": 0.46875}, {"iteration": 240, "vs_random": 0.84375, "vs_expander": 0.75, "vs_hunter": 0.53125}, {"iteration": 260, "vs_random": 0.71875, "vs_expander": 0.84375, "vs_hunter": 0.5625}, {"iteration": 280, "vs_random": 0.859375, "vs_expander": 0.78125, "vs_hunter": 0.609375}]};
+
+  const META = [
+    { run: "main5", title: "Memory features land, no fix yet", note: "Fog-of-war memory channels added. Stage D still an open wound at this point — win rate falls off a cliff after iteration 60.", status: "crit", label: "Collapsed" },
+    { run: "main6", title: "Suppress the untrained build logit", note: "Build-action logit never got gradient through A/B/C, so it entered Stage D at random init and corrupted argmax from turn one. Fixed — helped the start, not the slide.", status: "crit", label: "Still declined" },
+    { run: "main7", title: "Magnet-KL anchoring + EMA weights", note: "Ported from strakam/AverageJoe: KL-pull toward a sensible heuristic instead of a plain entropy bonus, plus EMA-smoothed eval. First run to hold 300+ iterations without collapsing.", status: "good", label: "Breakthrough" },
+    { run: "main8", title: "General-safety reward shaping v1", note: "Added after reading real leaderboard losses by hand: potential-based reward for keeping a home garrison. Held steady — didn't clearly move the needle yet.", status: "warn", label: "Mixed" },
+    { run: "main9", title: "BC-refined on 116K real leaderboard replays", note: "Real games from the actual generals.bot ladder (elo≥1800), moves reconstructed from board-state diffs. Best sustained run so far — peaked 86% vs Hunter at iteration 120.", status: "good", label: "Best yet" },
+    { run: "main10", title: "4× stronger safety weight + garrison fix", note: "Direct inspection showed the garrison barely above passive growth. Raised the shaping weight and target, fixed a matching bug in the magnet. vs_hunter plateaued around 53–58%.", status: "warn", label: "Plateaued" },
+    { run: "main11", title: "Imitate Hunter's garrison directly", note: "Behavior-cloned onto Hunter's own moves (played against the checkpoint itself, not Hunter-vs-Hunter). Sharp dip on landing, now recovering — 61% and climbing as of the last check.", status: "warn", label: "Ongoing" },
+  ];
+
+  const W = 300, H = 168, PAD = { t: 10, r: 10, b: 22, l: 28 };
+  const plotW = W - PAD.l - PAD.r, plotH = H - PAD.t - PAD.b;
+
+  const seriesDef = [
+    { key: "vs_random",   varName: "--series-random"   },
+    { key: "vs_expander", varName: "--series-expander" },
+    { key: "vs_hunter",   varName: "--series-hunter"   },
+  ];
+
+  function buildChart(rows, containerId) {
+    const maxIter = Math.max(...rows.map(r => r.iteration));
+    const x = it => PAD.l + (it / maxIter) * plotW;
+    const y = v => PAD.t + (1 - v) * plotH;
+
+    let svg = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+
+    // gridlines at 0/25/50/75/100%
+    [0, 0.25, 0.5, 0.75, 1].forEach(gv => {
+      const gy = y(gv);
+      svg += `<line class="${gv === 0 ? 'baseline' : 'gridline'}" x1="${PAD.l}" y1="${gy}" x2="${W - PAD.r}" y2="${gy}" />`;
+      if (gv === 0 || gv === 0.5 || gv === 1) {
+        svg += `<text class="axis-label num" x="${PAD.l - 5}" y="${gy + 3}" text-anchor="end">${Math.round(gv * 100)}</text>`;
+      }
+    });
+
+    // x tick at last iteration
+    svg += `<text class="axis-label num" x="${W - PAD.r}" y="${H - 5}" text-anchor="end">iter ${maxIter}</text>`;
+    svg += `<text class="axis-label num" x="${PAD.l}" y="${H - 5}" text-anchor="start">0</text>`;
+
+    seriesDef.forEach(s => {
+      const pts = rows.map(r => `${x(r.iteration)},${y(r[s.key])}`).join(" L ");
+      svg += `<path class="series-line" d="M ${pts}" style="stroke:var(${s.varName})" />`;
+      rows.forEach(r => {
+        svg += `<circle class="series-dot" cx="${x(r.iteration)}" cy="${y(r[s.key])}" r="2.6" style="fill:var(${s.varName})" />`;
+      });
+      const last = rows[rows.length - 1];
+      svg += `<circle class="series-dot" cx="${x(last.iteration)}" cy="${y(last[s.key])}" r="4" style="fill:var(${s.varName})" />`;
+    });
+
+    // hover capture + crosshair
+    svg += `<line class="hover-line" x1="0" y1="${PAD.t}" x2="0" y2="${H - PAD.b}" id="${containerId}-hoverline" />`;
+    svg += `<rect class="hover-catch" x="${PAD.l}" y="0" width="${plotW}" height="${H}" id="${containerId}-catch" />`;
+    svg += `</svg>`;
+    svg += `<div class="tooltip" id="${containerId}-tooltip"></div>`;
+
+    return svg;
+  }
+
+  function wireHover(rows, containerId, wrapperEl) {
+    const catchEl = wrapperEl.querySelector(`#${containerId}-catch`);
+    const hoverLine = wrapperEl.querySelector(`#${containerId}-hoverline`);
+    const tooltip = wrapperEl.querySelector(`#${containerId}-tooltip`);
+    const maxIter = Math.max(...rows.map(r => r.iteration));
+    const svgEl = wrapperEl.querySelector(".chart-svg");
+
+    function nearestRow(iterVal) {
+      let best = rows[0], bestD = Infinity;
+      rows.forEach(r => {
+        const d = Math.abs(r.iteration - iterVal);
+        if (d < bestD) { bestD = d; best = r; }
+      });
+      return best;
+    }
+
+    catchEl.addEventListener("mousemove", (ev) => {
+      const rect = svgEl.getBoundingClientRect();
+      const scaleX = W / rect.width;
+      const localX = (ev.clientX - rect.left) * scaleX;
+      const iterVal = ((localX - PAD.l) / plotW) * maxIter;
+      const row = nearestRow(iterVal);
+      const px = PAD.l + (row.iteration / maxIter) * plotW;
+      const pxScreen = rect.left + px / scaleX;
+      const topScreen = rect.top;
+
+      hoverLine.setAttribute("x1", px);
+      hoverLine.setAttribute("x2", px);
+      hoverLine.style.opacity = 1;
+
+      tooltip.innerHTML = `
+        <div class="tt-iter">iteration ${row.iteration}</div>
+        <div class="tt-row"><span class="tt-dot" style="background:var(--series-random)"></span>random &nbsp;<b class="num">${Math.round(row.vs_random * 100)}%</b></div>
+        <div class="tt-row"><span class="tt-dot" style="background:var(--series-expander)"></span>expander <b class="num">${Math.round(row.vs_expander * 100)}%</b></div>
+        <div class="tt-row"><span class="tt-dot" style="background:var(--series-hunter)"></span>hunter &nbsp;<b class="num">${Math.round(row.vs_hunter * 100)}%</b></div>
+      `;
+      const wrapRect = wrapperEl.getBoundingClientRect();
+      tooltip.style.left = (pxScreen - wrapRect.left) + "px";
+      tooltip.style.top = (topScreen - wrapRect.top - 6) + "px";
+      tooltip.style.opacity = 1;
+    });
+
+    catchEl.addEventListener("mouseleave", () => {
+      hoverLine.style.opacity = 0;
+      tooltip.style.opacity = 0;
+    });
+  }
+
+  const chaptersEl = document.getElementById("chapters");
+  META.forEach((m, i) => {
+    const rows = DATA[m.run];
+    if (!rows || !rows.length) return;
+    const containerId = "chart-" + m.run;
+    const card = document.createElement("div");
+    card.className = "chapter";
+    card.innerHTML = `
+      <div class="chapter-head">
+        <div class="chapter-title">${String(i + 1).padStart(2, "0")} &middot; <span class="run-id">${m.run}</span></div>
+        <span class="pill ${m.status}">${m.label}</span>
+      </div>
+      <div class="chapter-title" style="font-weight:600;font-size:13px;color:var(--text-secondary);margin-bottom:6px;">${m.title}</div>
+      <div class="chapter-note">${m.note}</div>
+      <div style="position:relative;">${buildChart(rows, containerId)}</div>
+    `;
+    chaptersEl.appendChild(card);
+    wireHover(rows, containerId, card);
+  });
+
+  // table
+  const tbody = document.getElementById("table-body");
+  let html = "";
+  META.forEach(m => {
+    const rows = DATA[m.run];
+    if (!rows) return;
+    rows.forEach((r, idx) => {
+      html += `<tr class="${idx === 0 ? 'run-sep' : ''}">
+        <td class="run-cell">${idx === 0 ? m.run : ""}</td>
+        <td class="num">${r.iteration}</td>
+        <td class="num">${Math.round(r.vs_random * 100)}%</td>
+        <td class="num">${Math.round(r.vs_expander * 100)}%</td>
+        <td class="num">${Math.round(r.vs_hunter * 100)}%</td>
+      </tr>`;
+    });
+  });
+  tbody.innerHTML = html;
+})();
+</script>
