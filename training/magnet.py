@@ -49,7 +49,7 @@ def expander_magnet(
     score_build: float = 2.0,
     score_topk: float = 2.0,
     topk: int = 5,
-    score_garrison_penalty: float = -6.0,
+    score_garrison_penalty: float = -10.0,
 ) -> jnp.ndarray:
     """(H*W*9 + 1,) probability distribution favoring expansion and capture --
     same shape/layout as the network's flat action logits

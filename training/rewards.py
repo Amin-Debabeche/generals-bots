@@ -56,7 +56,7 @@ def _contact_potential(obs: Observation) -> jnp.ndarray:
     return jnp.where(has_owned & has_enemy, -norm_dist, -1.0)
 
 
-GARRISON_FRACTION = 0.25
+GARRISON_FRACTION = 0.4
 MIN_GARRISON = 4.0
 
 
@@ -85,7 +85,16 @@ def _general_safety_potential(obs: Observation) -> jnp.ndarray:
     meaningful defensive reserve. See also general_safety_weight in
     training/config.py, raised alongside this after the same inspection
     showed the *pull* toward even the old target was too weak to move
-    behavior at all."""
+    behavior at all.
+
+    Raised again 0.25 -> 0.4 (main11, Stage E): the 0.25/0.8-weight round
+    was real progress, not a wash -- garrison near losses went from ~8% to
+    ~14.6% of total army and win rate vs Hunter partially recovered -- but
+    still well short of surviving reliably. Escalating the same
+    already-working direction further rather than switching mechanisms
+    again, since potential-based shaping stays policy-invariant at any
+    weight (Ng et al.) -- a stronger pull can't change what the optimal
+    policy *is*, only how fast/hard training is pushed toward it."""
     own_general = obs.generals & obs.owned_cells
     gen_army = jnp.sum(jnp.where(own_general, obs.armies, 0)).astype(jnp.float32)
     target = jnp.maximum(GARRISON_FRACTION * obs.owned_army_count.astype(jnp.float32), MIN_GARRISON)

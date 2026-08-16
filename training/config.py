@@ -65,7 +65,13 @@ class PPOConfig:
     # Hunter's simpler overall style, not just its defensive habit --
     # escalating this weight instead keeps the RL objective in charge of
     # everything except the one specific behavior being nudged.
-    general_safety_weight: float = 0.8
+    # Raised again 0.8 -> 2.0 (main11, Stage E): the 0.8 round was real
+    # progress (garrison near losses ~8% -> ~14.6% of total army, per direct
+    # inspection) but still well short of surviving Hunter reliably --
+    # target vs_hunter is 80%, currently ~50%. Escalating the same
+    # already-working lever further alongside GARRISON_FRACTION 0.25->0.4
+    # in training/rewards.py.
+    general_safety_weight: float = 2.0
     # Exponential moving average of network weights, updated every iteration
     # (see training/train.py's ema_net) and used for eval/promotion decisions
     # and as the frozen Stage-D reference -- insulates those signals from
