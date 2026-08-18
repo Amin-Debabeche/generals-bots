@@ -58,15 +58,12 @@ def flatten_batch(trajectory, advantages: jnp.ndarray, returns: jnp.ndarray) -> 
     )
 
 
-def _index_batch(batch: FlatBatch, idx) -> FlatBatch:
-    return FlatBatch(
-        obs=jax.tree.map(lambda x: x[idx], batch.obs),
-        mem=jax.tree.map(lambda x: x[idx], batch.mem),
-        action_index=batch.action_index[idx],
-        old_logprob=batch.old_logprob[idx],
-        advantage=batch.advantage[idx],
-        ret=batch.ret[idx],
-    )
+def _index_batch(batch, idx):
+    """Generic pytree indexing -- works for FlatBatch (or any other
+    NamedTuple-of-arrays batch shape, e.g. a future transformer-path
+    equivalent) without hand-listing fields, since JAX's tree.map already
+    recurses through nested NamedTuples down to the leaf arrays."""
+    return jax.tree.map(lambda x: x[idx], batch)
 
 
 def _forward_one(net: PolicyValueNetwork, obs: Observation, mem: MemoryState, action_index: jnp.ndarray,
@@ -131,13 +128,38 @@ def make_train_step(optimizer: optax.GradientTransformation, build_castles_enabl
     return train_step
 
 
+def compute_top_k_advantage_indices(advantages: jnp.ndarray, adv_top_frac: float,
+                                     minibatch_size: int) -> jnp.ndarray:
+    """advantages: (total_samples,) flat, in the SAME order flatten_batch's
+    output is in (so the returned indices index directly into a FlatBatch's
+    fields via _index_batch/train_epoch's `sample_idx`). Returns indices of
+    the adv_top_frac highest-|advantage| samples, rounded down to a multiple
+    of minibatch_size so every epoch's minibatches stay a fixed size (no
+    recompilation). Ported from strakam/AverageJoe's train/ppo.py
+    (`n_keep`/`_compute_top_idx`) -- concentrates gradient steps on the
+    highest-signal transitions instead of the (often near-zero-advantage,
+    in a sparse-reward regime) majority."""
+    total = advantages.shape[0]
+    n_keep = int(total * adv_top_frac)
+    n_keep = (n_keep // minibatch_size) * minibatch_size
+    n_keep = max(min(minibatch_size, total), n_keep)  # never below one minibatch (or total, if smaller)
+    _, top_idx = jax.lax.top_k(jnp.abs(advantages), n_keep)
+    return top_idx
+
+
 def train_epoch(net, opt_state, train_step, flat_batch: FlatBatch, key: jnp.ndarray,
-                 minibatch_size: int, clip_eps: float, value_coef: float, entropy_coef: float):
-    """One shuffled pass over `flat_batch`. Drops the last incomplete minibatch
-    (keeps minibatch_size fixed -> no recompilation across epochs/iterations)."""
-    bs = flat_batch.action_index.shape[0]
+                 minibatch_size: int, clip_eps: float, value_coef: float, entropy_coef: float,
+                 sample_idx: jnp.ndarray | None = None):
+    """One shuffled pass over `flat_batch`, or -- if `sample_idx` is given
+    (see compute_top_k_advantage_indices) -- one shuffled pass over just that
+    subset, reshuffled fresh each call so a multi-epoch loop sees a different
+    minibatch grouping of the same filtered pool every epoch. Drops the last
+    incomplete minibatch (keeps minibatch_size fixed -> no recompilation
+    across epochs/iterations)."""
+    pool_idx = jnp.arange(flat_batch.action_index.shape[0]) if sample_idx is None else sample_idx
+    bs = pool_idx.shape[0]
     perm = jrandom.permutation(key, bs)
-    shuffled = _index_batch(flat_batch, perm)
+    shuffled = _index_batch(flat_batch, pool_idx[perm])
 
     # Normally bs is an exact multiple of minibatch_size (131072/1024=128 at
     # the real training defaults), so dropping a remainder never loses data.

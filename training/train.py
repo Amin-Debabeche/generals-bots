@@ -313,13 +313,19 @@ def main():
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             returns = advantages + trajectory.value
             flat = ppo.flatten_batch(trajectory, advantages, returns)
+            sample_idx = ppo.compute_top_k_advantage_indices(
+                flat.advantage, ppo_cfg.adv_top_frac, ppo_cfg.minibatch_size)
 
             epoch_metrics = None
+            epochs_used = 0
             for _epoch in range(ppo_cfg.num_epochs):
                 key, ek = jrandom.split(key)
                 net, opt_state, epoch_metrics = ppo.train_epoch(
                     net, opt_state, train_step, flat, ek, ppo_cfg.minibatch_size,
-                    ppo_cfg.clip_eps, ppo_cfg.value_coef, stage.entropy_coef)
+                    ppo_cfg.clip_eps, ppo_cfg.value_coef, stage.entropy_coef, sample_idx=sample_idx)
+                epochs_used += 1
+                if ppo_cfg.target_kl is not None and float(epoch_metrics["approx_kl"]) > ppo_cfg.target_kl:
+                    break
 
             decay = ppo_cfg.weight_ema_decay
             ema_net = jax.tree.map(lambda e, c: decay * e + (1 - decay) * c, ema_net, net)
@@ -334,6 +340,7 @@ def main():
                 "sps": (ppo_cfg.num_envs * ppo_cfg.num_steps) / elapsed,
                 "mean_reward": float(trajectory.reward.mean()),
                 "buckets": bucket_stats,
+                "epochs_used": epochs_used,
                 **{k: float(v) for k, v in epoch_metrics.items()},
             }
             append_jsonl(metrics_path, metrics_row)

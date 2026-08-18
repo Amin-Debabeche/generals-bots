@@ -109,6 +109,23 @@ class PPOConfig:
     # gradient-updated) network directly. 0.999 matches strakam/AverageJoe's
     # default (the #1-ranked real generals.io bot, same technique).
     weight_ema_decay: float = 0.999
+    # Both ported from strakam/AverageJoe's train/ppo.py, per
+    # ~/.claude/plans/drifting-questing-babbage.md Step 3 -- clean, contained
+    # PPO-loop additions, not network-specific (they operate on
+    # advantages/approx_kl, not on which network produced them). Their own
+    # config.py and default.yaml disagree slightly (0.25 vs 0.5 adv_top_frac,
+    # 2 vs 1 num_epochs -- a config/code mismatch already flagged elsewhere in
+    # the plan); target_kl=0.02 is the one value both agree on. Effectively
+    # dormant at this repo's current num_epochs=1 (a single epoch always
+    # "completes" regardless of target_kl -- there's nothing left to early-out
+    # of), ready to matter once num_epochs is revisited on real Colab GPU
+    # timing rather than this machine's CPU-bound ~55s/epoch estimate.
+    target_kl: float | None = 0.02
+    # Fraction of the flattened rollout batch kept (by top |advantage|) before
+    # minibatching -- concentrates gradient steps on the highest-signal
+    # transitions instead of spending them equally on the (in a sparse-reward
+    # regime, often near-zero-advantage) majority.
+    adv_top_frac: float = 0.5
 
 
 @dataclass(frozen=True)
