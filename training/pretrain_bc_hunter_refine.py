@@ -50,11 +50,14 @@ from generals.agents import HunterAgent
 from generals.core import game
 
 from training import action_space as asp
+from training import augment as aug_mod
 from training import curriculum as cur
 from training import memory as mem_mod
-from training.config import NetworkConfig
+from training import rollout as ro
+from training.config import NetworkConfig, TransformerNetworkConfig
 from training.network import PolicyValueNetwork
-from training.pretrain_bc import make_bc_train_step, _flatten
+from training.network_transformer import TransformerPolicyValueNetwork
+from training.pretrain_bc import make_bc_train_step, make_bc_train_step_transformer, run_bc_epochs, _flatten
 from training.rollout import _reset_memory_where_done, init_memory_batch
 
 _HUNTER = HunterAgent()
@@ -63,6 +66,9 @@ _HUNTER = HunterAgent()
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--init-from", required=True, help="checkpoint whose behavior main9 (etc.) needs refined")
+    p.add_argument("--network", choices=("cnn", "transformer"), default="cnn",
+                    help="must match --init-from's architecture; see "
+                         "~/.claude/plans/drifting-questing-babbage.md")
     p.add_argument("--out", required=True)
     p.add_argument("--num-envs", type=int, default=128,
                     help="split evenly: half Hunter-as-seat0, half Hunter-as-seat1")
@@ -143,6 +149,89 @@ def collect_hunter_vs_policy_demonstrations(env, pool, net, num_envs: int, num_s
     return h_obs, h_mem, h_action
 
 
+def _policy_action_transformer(net, obs, obs_state, key, build_castles_enabled):
+    augmented, new_state = aug_mod.augment_obs(obs, obs_state)
+    normed = aug_mod.normalize_augmented(augmented)
+    temporal = aug_mod.temporal_data(new_state)
+    logits, _value = net(normed, temporal)
+    mask = asp.compute_legal_action_mask(obs, build_castles_enabled)
+    idx = asp.sample_action_index(key, logits, mask)
+    H, W = obs.armies.shape
+    return asp.decode_action_index(idx, H, W)
+
+
+def collect_hunter_vs_policy_demonstrations_transformer(env, pool, net, num_envs: int, num_steps: int,
+                                                          build_castles_enabled: bool, key: jnp.ndarray,
+                                                          cfg: TransformerNetworkConfig = TransformerNetworkConfig()):
+    """Transformer-path twin of collect_hunter_vs_policy_demonstrations --
+    same seat-split/where-select structure (both a "would-be Hunter" and a
+    "would-be net" action computed for every env every step, then
+    jnp.where-selected per the static hunter_seat split -- matches the CNN
+    version's own vectorized-branch-then-select design, not a new pattern).
+    AugmentedObsState for BOTH seats progresses every step regardless of
+    which identity (Hunter or net) currently occupies that seat, via
+    aug_mod.augment_obs called unconditionally on obs0/obs1 (see
+    training/rollout.py's transformer-path section docstring -- no separate
+    post-action update needed, unlike MemoryState)."""
+    get_obs = game.get_full_observation if env.perfect_info else game.get_observation
+    half = num_envs // 2
+
+    init_keys = jrandom.split(key, num_envs + 1)
+    states = jax.vmap(env.init_state)(init_keys[:num_envs])
+    step_key = init_keys[num_envs]
+    obs_state0 = ro.init_obs_state_batch(num_envs, cfg)
+    obs_state1 = ro.init_obs_state_batch(num_envs, cfg)
+    hunter_seat = jnp.concatenate([jnp.zeros(half, dtype=jnp.int32),
+                                    jnp.ones(num_envs - half, dtype=jnp.int32)])
+
+    def step_fn(carry, key_t):
+        states, obs_state0, obs_state1 = carry
+        n = states.armies.shape[0]
+        k0, k1, kp = jrandom.split(key_t, 3)
+        keys0 = jrandom.split(k0, n)
+        keys1 = jrandom.split(k1, n)
+        keysp = jrandom.split(kp, n)
+
+        obs0 = jax.vmap(lambda s: get_obs(s, 0))(states)
+        obs1 = jax.vmap(lambda s: get_obs(s, 1))(states)
+
+        _aug0, obs_state0_next = jax.vmap(aug_mod.augment_obs)(obs0, obs_state0)
+        _aug1, obs_state1_next = jax.vmap(aug_mod.augment_obs)(obs1, obs_state1)
+
+        hunter_a0 = jax.vmap(_HUNTER.act)(obs0, keys0)
+        hunter_a1 = jax.vmap(_HUNTER.act)(obs1, keys1)
+        policy_a0 = jax.vmap(
+            lambda o, s, k: _policy_action_transformer(net, o, s, k, build_castles_enabled)
+        )(obs0, obs_state0, keysp)
+        policy_a1 = jax.vmap(
+            lambda o, s, k: _policy_action_transformer(net, o, s, k, build_castles_enabled)
+        )(obs1, obs_state1, keysp)
+        a0 = jnp.where((hunter_seat == 0)[:, None], hunter_a0, policy_a0)
+        a1 = jnp.where((hunter_seat == 1)[:, None], hunter_a1, policy_a1)
+
+        actions = jnp.stack([a0, a1], axis=1)
+        timesteps, new_states = jax.vmap(lambda s, a: env.step(s, a, pool))(states, actions)
+        done = timesteps.terminated | timesteps.truncated
+
+        obs_state0_next = aug_mod.reset_obs_state_where(obs_state0_next, done)
+        obs_state1_next = aug_mod.reset_obs_state_where(obs_state1_next, done)
+
+        hunter_obs = jax.tree.map(
+            lambda x, y: jnp.where((hunter_seat == 0).reshape((-1,) + (1,) * (x.ndim - 1)), x, y), obs0, obs1
+        )
+        hunter_state = jax.tree.map(
+            lambda x, y: jnp.where((hunter_seat == 0).reshape((-1,) + (1,) * (x.ndim - 1)), x, y),
+            obs_state0, obs_state1,
+        )
+        hunter_action = jnp.where((hunter_seat == 0)[:, None], a0, a1)
+
+        return (new_states, obs_state0_next, obs_state1_next), (hunter_obs, hunter_state, hunter_action)
+
+    keys = jrandom.split(step_key, num_steps)
+    _final, (h_obs, h_state, h_action) = jax.lax.scan(step_fn, (states, obs_state0, obs_state1), keys)
+    return h_obs, h_state, h_action
+
+
 def main():
     args = parse_args()
     key = jrandom.PRNGKey(args.seed)
@@ -153,58 +242,54 @@ def main():
     pool, _ = env.reset(pool_key)
 
     net_key, key = jrandom.split(key)
-    template = PolicyValueNetwork(net_key, NetworkConfig())
-    net = eqx.tree_deserialise_leaves(args.init_from, template)
-    print(f"refining {args.init_from}")
+    if args.network == "transformer":
+        cfg = TransformerNetworkConfig()
+        template = TransformerPolicyValueNetwork(net_key, cfg)
+        net = eqx.tree_deserialise_leaves(args.init_from, template)
+    else:
+        template = PolicyValueNetwork(net_key, NetworkConfig())
+        net = eqx.tree_deserialise_leaves(args.init_from, template)
+    print(f"refining {args.init_from} ({args.network})")
 
     print(f"Collecting Hunter-vs-{Path(args.init_from).stem} demonstrations: "
           f"{args.num_envs} envs x {args.num_steps} steps on {stage.name}'s ruleset...")
     t0 = time.time()
-    h_obs, h_mem, h_action = collect_hunter_vs_policy_demonstrations(
-        env, pool, net, args.num_envs, args.num_steps, stage.build_castles_enabled, collect_key
-    )
+    if args.network == "transformer":
+        h_obs, h_state, h_action = collect_hunter_vs_policy_demonstrations_transformer(
+            env, pool, net, args.num_envs, args.num_steps, stage.build_castles_enabled, collect_key, cfg
+        )
+    else:
+        h_obs, h_state, h_action = collect_hunter_vs_policy_demonstrations(
+            env, pool, net, args.num_envs, args.num_steps, stage.build_castles_enabled, collect_key
+        )
     jax.block_until_ready(h_action)
     print(f"  collected in {time.time() - t0:.1f}s")
 
     H, W = h_obs.armies.shape[-2], h_obs.armies.shape[-1]
     all_obs = _flatten(h_obs)
-    all_mem = _flatten(h_mem)
+    all_state = _flatten(h_state)
     all_actions = h_action.reshape(-1, 5)
     all_idx = jax.vmap(lambda a: asp.encode_action_index(a, H, W))(all_actions)
 
     num_samples = all_idx.shape[0]
-    print(f"dataset: {num_samples} (observation, memory, Hunter-action) pairs")
+    print(f"dataset: {num_samples} (observation, state, Hunter-action) pairs")
     pass_idx = H * W * asp.NUM_CELL_ACTIONS
     pass_frac = float(jnp.mean((all_idx == pass_idx).astype(jnp.float32)))
     print(f"  fraction of Hunter's actions that are PASS: {pass_frac:.3f}")
 
     optimizer = optax.adam(args.learning_rate)
     opt_state = optimizer.init(eqx.filter(net, eqx.is_array))
-    train_step = make_bc_train_step(optimizer)
+    if args.network == "transformer":
+        train_step = make_bc_train_step_transformer(optimizer, stage.build_castles_enabled)
+    else:
+        train_step = make_bc_train_step(optimizer)
 
     print(f"\nTraining {args.epochs} epochs, minibatch={args.minibatch_size}, lr={args.learning_rate}...")
-    for epoch in range(args.epochs):
-        key, perm_key = jrandom.split(key)
-        perm = jrandom.permutation(perm_key, num_samples)
-        obs_shuf = jax.tree.map(lambda x: x[perm], all_obs)
-        mem_shuf = jax.tree.map(lambda x: x[perm], all_mem)
-        idx_shuf = all_idx[perm]
-
-        num_batches = num_samples // args.minibatch_size
-        epoch_loss, epoch_acc = 0.0, 0.0
-        t0 = time.time()
-        for i in range(num_batches):
-            sl = slice(i * args.minibatch_size, (i + 1) * args.minibatch_size)
-            batch_obs = jax.tree.map(lambda x: x[sl], obs_shuf)
-            batch_mem = jax.tree.map(lambda x: x[sl], mem_shuf)
-            batch_idx = idx_shuf[sl]
-            net, opt_state, loss, acc = train_step(net, opt_state, batch_obs, batch_mem, batch_idx)
-            epoch_loss += float(loss)
-            epoch_acc += float(acc)
-        epoch_loss /= num_batches
-        epoch_acc /= num_batches
-        print(f"epoch {epoch}: loss={epoch_loss:.4f} argmax-matches-Hunter accuracy={epoch_acc:.3f} "
-              f"({time.time() - t0:.1f}s)")
+    key, train_key = jrandom.split(key)
+    net, opt_state = run_bc_epochs(
+        net, opt_state, train_step, all_obs, all_state, all_idx,
+        args.epochs, args.minibatch_size, train_key, label="Hunter-action pairs",
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

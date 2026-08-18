@@ -46,7 +46,9 @@ import requests
 
 from generals.core import game
 from training import action_space as asp
+from training import augment as aug_mod
 from training import memory as mem_mod
+from training.config import TransformerNetworkConfig
 
 API_BASE = "https://www.generals.bot/api/leaderboard"
 DIRECTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up, down, left, right -- matches generals/core/action.py
@@ -226,6 +228,39 @@ def collect_bc_samples(reconstructed, elite_seats: set[int]):
     return samples, num_illegal
 
 
+def collect_bc_samples_transformer(reconstructed, elite_seats: set[int],
+                                    cfg: TransformerNetworkConfig = TransformerNetworkConfig()):
+    """Transformer-path twin of collect_bc_samples -- same elite-seat
+    filtering and illegal-target guard, but tracks AugmentedObsState instead
+    of MemoryState. aug_mod.augment_obs(obs, obs_state) is called once per
+    seat per tick with the PRE-step observation already computed here (no
+    separate post-step pass needed, unlike memory's update_memory -- see
+    training/rollout.py's transformer-path section docstring)."""
+    obs_state = {0: aug_mod.init_obs_state(cfg), 1: aug_mod.init_obs_state(cfg)}
+    samples = []
+    num_illegal = 0
+    actions_by_seat = {0: PASS_ACTION, 1: PASS_ACTION}
+
+    for state, a0, a1 in reconstructed:
+        actions_by_seat[0], actions_by_seat[1] = a0, a1
+        obs_state_next = {}
+        for p in (0, 1):
+            obs = _pad_observation(game.get_observation(state, p), cfg.grid_size)
+            _augmented, obs_state_next[p] = aug_mod.augment_obs(obs, obs_state[p])
+            if p not in elite_seats:
+                continue
+            idx = int(asp.encode_action_index(jnp.asarray(actions_by_seat[p]), cfg.grid_size, cfg.grid_size))
+            mask = asp.compute_legal_action_mask(obs, build_castles_enabled=False)
+            if not bool(mask[idx]):
+                num_illegal += 1
+                continue
+            samples.append((obs, obs_state[p], idx))
+
+        obs_state = obs_state_next
+
+    return samples, num_illegal
+
+
 def _pad_observation(obs, canvas: int = CANVAS):
     H, W = obs.armies.shape
     if H == canvas and W == canvas:
@@ -251,6 +286,10 @@ def _pad_observation(obs, canvas: int = CANVAS):
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", required=True, help="output .npz")
+    p.add_argument("--network", choices=("cnn", "transformer"), default="cnn",
+                    help="cnn: MemoryState-based samples (default, matches the currently-deployed "
+                         "architecture). transformer: AugmentedObsState-based samples, see "
+                         "~/.claude/plans/drifting-questing-babbage.md")
     p.add_argument("--min-elo", type=float, default=1800.0,
                     help="only extract moves from players at or above this elo")
     p.add_argument("--min-games", type=int, default=10,
@@ -285,6 +324,10 @@ def main():
     if args.max_games:
         game_ids = game_ids[:args.max_games]
 
+    transformer_cfg = TransformerNetworkConfig()
+    collect_fn = (lambda reconstructed, elite_seats: collect_bc_samples_transformer(reconstructed, elite_seats, transformer_cfg)) \
+        if args.network == "transformer" else collect_bc_samples
+
     all_samples = []
     total_matched, total_ticks, total_illegal = 0, 0, 0
     games_used = 0
@@ -311,7 +354,7 @@ def main():
         total_ticks += stats["total"]
         games_used += 1
 
-        samples, num_illegal = collect_bc_samples(reconstructed, elite_seats)
+        samples, num_illegal = collect_fn(reconstructed, elite_seats)
         all_samples.extend(samples)
         total_illegal += num_illegal
 
@@ -327,11 +370,17 @@ def main():
 
     from generals.core.observation import Observation
     obs_fields = Observation._fields
-    mem_fields = mem_mod.MemoryState._fields
-    stacked = {f: np.stack([np.asarray(getattr(o, f)) for o, _m, _i in all_samples]) for f in obs_fields}
-    for f in mem_fields:
-        stacked[f"mem_{f}"] = np.stack([np.asarray(getattr(m, f)) for _o, m, _i in all_samples])
-    stacked["action_index"] = np.array([idx for _o, _m, idx in all_samples], dtype=np.int64)
+    stacked = {f: np.stack([np.asarray(getattr(o, f)) for o, _s, _i in all_samples]) for f in obs_fields}
+    if args.network == "transformer":
+        # float16, not float32 -- see training/human_replays.py's identical note
+        # (AugmentedObsState is meaningfully heavier than MemoryState per sample).
+        for f in aug_mod.AugmentedObsState._fields:
+            vals = np.stack([np.asarray(getattr(s, f)) for _o, s, _i in all_samples])
+            stacked[f"obs_state_{f}"] = vals.astype(np.float16) if vals.dtype != np.bool_ else vals
+    else:
+        for f in mem_mod.MemoryState._fields:
+            stacked[f"mem_{f}"] = np.stack([np.asarray(getattr(s, f)) for _o, s, _i in all_samples])
+    stacked["action_index"] = np.array([idx for _o, _s, idx in all_samples], dtype=np.int64)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

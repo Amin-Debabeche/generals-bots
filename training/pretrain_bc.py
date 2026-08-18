@@ -43,10 +43,13 @@ from generals.agents import HunterAgent
 from generals.core import game
 
 from training import action_space as asp
+from training import augment as aug_mod
 from training import curriculum as cur
 from training import memory as mem_mod
-from training.config import NetworkConfig
+from training import rollout as ro
+from training.config import NetworkConfig, TransformerNetworkConfig
 from training.network import PolicyValueNetwork
+from training.network_transformer import TransformerPolicyValueNetwork
 from training.rollout import _reset_memory_where_done, init_memory_batch
 
 TRAINING_DIR = Path(__file__).resolve().parent
@@ -56,6 +59,10 @@ _HUNTER = HunterAgent()
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", required=True, help="output path for the pretrained network (.eqx)")
+    p.add_argument("--network", choices=("cnn", "transformer"), default="cnn",
+                    help="cnn: training/network.py (default, the currently-deployed architecture). "
+                         "transformer: training/network_transformer.py, see "
+                         "~/.claude/plans/drifting-questing-babbage.md")
     p.add_argument("--num-envs", type=int, default=128, help="parallel Hunter-vs-Hunter games for data collection")
     p.add_argument("--num-steps", type=int, default=384, help="steps per game (with pool auto-reset, so this covers many episodes)")
     p.add_argument("--epochs", type=int, default=6)
@@ -110,6 +117,58 @@ def collect_hunter_demonstrations(env, pool, num_envs: int, num_steps: int, key:
     return obs0, mem0_traj, a0, obs1, mem1_traj, a1
 
 
+@partial(jax.jit, static_argnames=("env", "num_envs", "num_steps", "cfg"))
+def collect_hunter_demonstrations_transformer(env, pool, num_envs: int, num_steps: int, key: jnp.ndarray,
+                                               cfg: TransformerNetworkConfig = TransformerNetworkConfig()):
+    """Transformer-path twin of collect_hunter_demonstrations -- see that
+    function's docstring (same Hunter-vs-Hunter data-doubling logic). Unlike
+    MemoryState, AugmentedObsState needs no separate post-action update:
+    aug_mod.augment_obs(obs, obs_state) is called once with the PRE-action
+    observation and its second return value is directly the correct
+    next-step carry (see training/rollout.py's transformer-path section
+    docstring for the full reasoning). Records the raw (obs, obs_state)
+    pair carried INTO each step, not the state after -- so BC training can
+    later recompute the exact same augmented tensor Hunter's action was
+    conditioned on, mirroring collect_hunter_demonstrations recording mem0
+    (not the post-update memory)."""
+    get_obs = game.get_full_observation if env.perfect_info else game.get_observation
+
+    init_keys = jrandom.split(key, num_envs + 1)
+    states = jax.vmap(env.init_state)(init_keys[:num_envs])
+    step_key = init_keys[num_envs]
+    obs_state0 = ro.init_obs_state_batch(num_envs, cfg)
+    obs_state1 = ro.init_obs_state_batch(num_envs, cfg)
+
+    def step_fn(carry, key_t):
+        states, obs_state0, obs_state1 = carry
+        n = states.armies.shape[0]
+        k0, k1 = jrandom.split(key_t)
+        keys0 = jrandom.split(k0, n)
+        keys1 = jrandom.split(k1, n)
+
+        obs0 = jax.vmap(lambda s: get_obs(s, 0))(states)
+        obs1 = jax.vmap(lambda s: get_obs(s, 1))(states)
+        a0 = jax.vmap(_HUNTER.act)(obs0, keys0)
+        a1 = jax.vmap(_HUNTER.act)(obs1, keys1)
+
+        actions = jnp.stack([a0, a1], axis=1)
+        timesteps, new_states = jax.vmap(lambda s, a: env.step(s, a, pool))(states, actions)
+        done = timesteps.terminated | timesteps.truncated
+
+        _augmented0, obs_state0_next = jax.vmap(aug_mod.augment_obs)(obs0, obs_state0)
+        _augmented1, obs_state1_next = jax.vmap(aug_mod.augment_obs)(obs1, obs_state1)
+        obs_state0_next = aug_mod.reset_obs_state_where(obs_state0_next, done)
+        obs_state1_next = aug_mod.reset_obs_state_where(obs_state1_next, done)
+
+        return (new_states, obs_state0_next, obs_state1_next), (obs0, obs_state0, a0, obs1, obs_state1, a1)
+
+    keys = jrandom.split(step_key, num_steps)
+    _final, (obs0, obs_state0_traj, a0, obs1, obs_state1_traj, a1) = jax.lax.scan(
+        step_fn, (states, obs_state0, obs_state1), keys
+    )
+    return obs0, obs_state0_traj, a0, obs1, obs_state1_traj, a1
+
+
 def _flatten(x):
     return jax.tree.map(lambda x: x.reshape((-1,) + x.shape[2:]), x)
 
@@ -148,6 +207,81 @@ def make_bc_train_step(optimizer):
     return train_step
 
 
+def _bc_loss_one_transformer(net: TransformerPolicyValueNetwork, obs, obs_state,
+                              target_idx: jnp.ndarray, build_castles_enabled: bool) -> jnp.ndarray:
+    augmented, new_state = aug_mod.augment_obs(obs, obs_state)
+    normed = aug_mod.normalize_augmented(augmented)
+    temporal = aug_mod.temporal_data(new_state)
+    logits, _value = net(normed, temporal)
+    mask = asp.compute_legal_action_mask(obs, build_castles_enabled)
+    log_probs = asp.masked_log_softmax(logits, mask)
+    return -log_probs[target_idx]
+
+
+def make_bc_train_step_transformer(optimizer, build_castles_enabled: bool):
+    """Transformer-path twin of make_bc_train_step -- build_castles_enabled
+    is baked in (not a runtime arg) for the same reason training/ppo.py's
+    make_train_step bakes it in: compute_legal_action_mask needs it static."""
+    def loss_and_acc(net, obs, obs_state, target_idx):
+        losses = jax.vmap(lambda o, s, i: _bc_loss_one_transformer(net, o, s, i, build_castles_enabled))(
+            obs, obs_state, target_idx)
+
+        def predict(o, s):
+            augmented, new_state = aug_mod.augment_obs(o, s)
+            normed = aug_mod.normalize_augmented(augmented)
+            temporal = aug_mod.temporal_data(new_state)
+            logits, _ = net(normed, temporal)
+            mask = asp.compute_legal_action_mask(o, build_castles_enabled)
+            return asp.greedy_action_index(logits, mask)
+
+        preds = jax.vmap(predict)(obs, obs_state)
+        acc = jnp.mean((preds == target_idx).astype(jnp.float32))
+        return jnp.mean(losses), acc
+
+    @eqx.filter_jit
+    def train_step(net, opt_state, obs, obs_state, target_idx):
+        (loss, acc), grads = eqx.filter_value_and_grad(loss_and_acc, has_aux=True)(net, obs, obs_state, target_idx)
+        updates, opt_state = optimizer.update(grads, opt_state, net)
+        net = eqx.apply_updates(net, updates)
+        return net, opt_state, loss, acc
+
+    return train_step
+
+
+def run_bc_epochs(net, opt_state, train_step, all_obs, all_state, all_idx, epochs: int,
+                   minibatch_size: int, key: jnp.ndarray, label: str = "pairs"):
+    """Generic shuffle-and-minibatch BC training loop -- works for either
+    (obs, MemoryState) or (obs, AugmentedObsState) batches, since indexing is
+    plain jax.tree.map underneath (same reasoning as training/ppo.py's
+    _index_batch). Shared by the transformer-path entry points below (and
+    reusable by the CNN path too, though that one keeps its own inline loop
+    unchanged here to avoid touching working code beyond what's needed)."""
+    num_samples = all_idx.shape[0]
+    for epoch in range(epochs):
+        key, perm_key = jrandom.split(key)
+        perm = jrandom.permutation(perm_key, num_samples)
+        obs_shuf = jax.tree.map(lambda x: x[perm], all_obs)
+        state_shuf = jax.tree.map(lambda x: x[perm], all_state)
+        idx_shuf = all_idx[perm]
+
+        num_batches = num_samples // minibatch_size
+        epoch_loss, epoch_acc = 0.0, 0.0
+        t0 = time.time()
+        for i in range(num_batches):
+            sl = slice(i * minibatch_size, (i + 1) * minibatch_size)
+            batch_obs = jax.tree.map(lambda x: x[sl], obs_shuf)
+            batch_state = jax.tree.map(lambda x: x[sl], state_shuf)
+            batch_idx = idx_shuf[sl]
+            net, opt_state, loss, acc = train_step(net, opt_state, batch_obs, batch_state, batch_idx)
+            epoch_loss += float(loss)
+            epoch_acc += float(acc)
+        epoch_loss /= max(num_batches, 1)
+        epoch_acc /= max(num_batches, 1)
+        print(f"epoch {epoch}: loss={epoch_loss:.4f} argmax-matches-target accuracy={epoch_acc:.3f} "
+              f"({time.time() - t0:.1f}s, {num_samples} {label})")
+    return net, opt_state
+
+
 def main():
     args = parse_args()
     key = jrandom.PRNGKey(args.seed)
@@ -157,25 +291,32 @@ def main():
     key, pool_key, collect_key = jrandom.split(key, 3)
     pool, _ = env.reset(pool_key)
 
-    print(f"Collecting Hunter-vs-Hunter demonstrations: {args.num_envs} envs x {args.num_steps} steps "
-          f"on {stage.name}'s ruleset...")
+    print(f"Collecting Hunter-vs-Hunter demonstrations ({args.network}): {args.num_envs} envs x "
+          f"{args.num_steps} steps on {stage.name}'s ruleset...")
     t0 = time.time()
-    obs0, mem0, a0, obs1, mem1, a1 = collect_hunter_demonstrations(
-        env, pool, args.num_envs, args.num_steps, collect_key
-    )
+
+    if args.network == "transformer":
+        cfg = TransformerNetworkConfig()
+        obs0, state0, a0, obs1, state1, a1 = collect_hunter_demonstrations_transformer(
+            env, pool, args.num_envs, args.num_steps, collect_key, cfg
+        )
+    else:
+        obs0, state0, a0, obs1, state1, a1 = collect_hunter_demonstrations(
+            env, pool, args.num_envs, args.num_steps, collect_key
+        )
     jax.block_until_ready(a0)
     print(f"  collected in {time.time() - t0:.1f}s")
 
     H, W = obs0.armies.shape[-2], obs0.armies.shape[-1]
     all_obs = jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), _flatten(obs0), _flatten(obs1))
-    all_mem = jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), _flatten(mem0), _flatten(mem1))
+    all_state = jax.tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), _flatten(state0), _flatten(state1))
     a0_flat = a0.reshape(-1, 5)
     a1_flat = a1.reshape(-1, 5)
     all_actions = jnp.concatenate([a0_flat, a1_flat], axis=0)
     all_idx = jax.vmap(lambda a: asp.encode_action_index(a, H, W))(all_actions)
 
     num_samples = all_idx.shape[0]
-    print(f"dataset: {num_samples} (observation, memory, Hunter-action) pairs")
+    print(f"dataset: {num_samples} (observation, state, Hunter-action) pairs")
     # Sanity: how much of the data is "pass" -- if Hunter itself passes constantly
     # on this board (it shouldn't, by design), BC would just learn to imitate that.
     pass_idx = H * W * asp.NUM_CELL_ACTIONS
@@ -183,34 +324,26 @@ def main():
     print(f"  fraction of Hunter's actions that are PASS: {pass_frac:.3f} (sanity check -- should be low)")
 
     net_key, key = jrandom.split(key)
-    net = PolicyValueNetwork(net_key, NetworkConfig())
-    optimizer = optax.adam(args.learning_rate)
-    opt_state = optimizer.init(eqx.filter(net, eqx.is_array))
-    train_step = make_bc_train_step(optimizer)
+    if args.network == "transformer":
+        cfg = TransformerNetworkConfig()
+        net = TransformerPolicyValueNetwork(net_key, cfg)
+        optimizer = optax.adam(args.learning_rate)
+        opt_state = optimizer.init(eqx.filter(net, eqx.is_array))
+        # build_castles_enabled=False: matches Stage C's ruleset used for
+        # data collection above (Hunter never builds regardless).
+        train_step = make_bc_train_step_transformer(optimizer, False)
+    else:
+        net = PolicyValueNetwork(net_key, NetworkConfig())
+        optimizer = optax.adam(args.learning_rate)
+        opt_state = optimizer.init(eqx.filter(net, eqx.is_array))
+        train_step = make_bc_train_step(optimizer)
 
     print(f"\nTraining {args.epochs} epochs, minibatch={args.minibatch_size}...")
-    for epoch in range(args.epochs):
-        key, perm_key = jrandom.split(key)
-        perm = jrandom.permutation(perm_key, num_samples)
-        obs_shuf = jax.tree.map(lambda x: x[perm], all_obs)
-        mem_shuf = jax.tree.map(lambda x: x[perm], all_mem)
-        idx_shuf = all_idx[perm]
-
-        num_batches = num_samples // args.minibatch_size
-        epoch_loss, epoch_acc = 0.0, 0.0
-        t0 = time.time()
-        for i in range(num_batches):
-            sl = slice(i * args.minibatch_size, (i + 1) * args.minibatch_size)
-            batch_obs = jax.tree.map(lambda x: x[sl], obs_shuf)
-            batch_mem = jax.tree.map(lambda x: x[sl], mem_shuf)
-            batch_idx = idx_shuf[sl]
-            net, opt_state, loss, acc = train_step(net, opt_state, batch_obs, batch_mem, batch_idx)
-            epoch_loss += float(loss)
-            epoch_acc += float(acc)
-        epoch_loss /= num_batches
-        epoch_acc /= num_batches
-        print(f"epoch {epoch}: loss={epoch_loss:.4f} argmax-matches-Hunter accuracy={epoch_acc:.3f} "
-              f"({time.time() - t0:.1f}s)")
+    key, train_key = jrandom.split(key)
+    net, opt_state = run_bc_epochs(
+        net, opt_state, train_step, all_obs, all_state, all_idx,
+        args.epochs, args.minibatch_size, train_key,
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

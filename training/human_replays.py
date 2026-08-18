@@ -43,7 +43,9 @@ import pandas as pd
 from generals.core import game
 from generals.core.observation import Observation
 from training import action_space as asp
+from training import augment as aug_mod
 from training import memory as mem_mod
+from training.config import TransformerNetworkConfig
 
 DIRECTIONS = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up, down, left, right -- matches generals/core/config.py
 _DIR_LOOKUP = {d: i for i, d in enumerate(DIRECTIONS)}
@@ -217,9 +219,75 @@ def simulate_replay(row: pd.Series, elite_players: set[int]):
     return samples, num_illegal
 
 
+def simulate_replay_transformer(row: pd.Series, elite_players: set[int],
+                                 cfg: TransformerNetworkConfig = TransformerNetworkConfig()):
+    """Transformer-path twin of simulate_replay -- same tick-by-tick replay
+    through the real engine, same elite-move filtering and illegal-move
+    guard, but tracks AugmentedObsState instead of MemoryState. Unlike
+    memory's separate post-action update, aug_mod.augment_obs(obs, obs_state)
+    is called ONCE per seat per turn with the PRE-action observation (see
+    training/rollout.py's transformer-path section docstring) -- so state
+    threading here is simpler: no separate "after" pass needed, just update
+    obs_state[p] to augment_obs's second return value once, for every
+    player, every turn (recording (obs, obs_state) as-carried-in for
+    whichever seats are elite, exactly like simulate_replay records mem_p
+    before its own post-hoc update)."""
+    grid = build_grid(row)
+    state = game.create_initial_state(jnp.asarray(grid))
+    moves = parse_moves(row)
+
+    by_turn: dict[int, dict[int, ReplayMove]] = {}
+    for mv in moves:
+        by_turn.setdefault(mv.turn, {})[mv.player] = mv
+    max_turn = max(by_turn) if by_turn else 0
+
+    obs_state = {0: aug_mod.init_obs_state(cfg), 1: aug_mod.init_obs_state(cfg)}
+
+    samples = []
+    num_illegal = 0
+
+    for t in range(max_turn + 1):
+        turn_moves = by_turn.get(t, {})
+        actions = []
+        obs_state_next = {}
+        for p in (0, 1):
+            mv = turn_moves.get(p)
+            obs = pad_observation(game.get_observation(state, p), cfg.grid_size)
+            _augmented, obs_state_next[p] = aug_mod.augment_obs(obs, obs_state[p])
+
+            if mv is None:
+                actions.append(PASS_ACTION)
+                continue
+            action = _move_to_action(mv)
+            if action is None:
+                actions.append(PASS_ACTION)
+                continue
+            actions.append(action)
+            if p in elite_players:
+                idx = int(asp.encode_action_index(action, cfg.grid_size, cfg.grid_size))
+                mask = asp.compute_legal_action_mask(obs, build_castles_enabled=False)
+                if not bool(mask[idx]):
+                    num_illegal += 1
+                else:
+                    samples.append((obs, obs_state[p], idx))
+
+        actions_arr = jnp.stack(actions)
+        state, _info = game.step(state, actions_arr)
+        obs_state = obs_state_next
+
+        if bool(state.winner >= 0):
+            break
+
+    return samples, num_illegal
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--parquet", required=True)
+    p.add_argument("--network", choices=("cnn", "transformer"), default="cnn",
+                    help="cnn: MemoryState-based samples (default, matches the currently-deployed "
+                         "architecture). transformer: AugmentedObsState-based samples, see "
+                         "~/.claude/plans/drifting-questing-babbage.md")
     p.add_argument("--min-stars", type=int, default=80)
     p.add_argument("--max-board", type=int, default=CANVAS,
                     help="skip replays with either map dimension above this (must fit the network's canvas)")
@@ -236,6 +304,10 @@ def main():
     if args.max_games:
         df = df.iloc[:args.max_games]
 
+    transformer_cfg = TransformerNetworkConfig()
+    simulate_fn = (lambda row, elite: simulate_replay_transformer(row, elite, transformer_cfg)) \
+        if args.network == "transformer" else simulate_replay
+
     all_samples = []
     total_illegal = 0
     games_used = 0
@@ -246,7 +318,7 @@ def main():
         if not elite:
             continue
         games_used += 1
-        samples, illegal = simulate_replay(row, elite)
+        samples, illegal = simulate_fn(row, elite)
         all_samples.extend(samples)
         total_illegal += illegal
         if games_used % 50 == 0:
@@ -256,16 +328,26 @@ def main():
     print(f"\nDone: {games_used} games, {len(all_samples)} samples, {total_illegal} illegal moves "
           f"({total_illegal / max(len(all_samples), 1) * 100:.3f}% -- should be ~0)")
 
-    # Stack into arrays matching Observation's and MemoryState's field names
-    # for np.savez -- memory fields prefixed "mem_" to keep the two
-    # namespaces apart (Observation and MemoryState share no field names
-    # today, but prefixing makes that an invariant, not an accident).
+    # Stack into arrays matching Observation's and MemoryState's/
+    # AugmentedObsState's field names for np.savez -- state fields prefixed
+    # "mem_"/"obs_state_" to keep namespaces apart (Observation shares no
+    # field names with either today, but prefixing makes that an invariant,
+    # not an accident). AugmentedObsState's float leaves are stored as
+    # float16, not float32: dataset size grows meaningfully with the richer
+    # state (history stacks + temporal history vs. MemoryState's handful of
+    # small fields), matching the mitigation training/rollout.py's trajectory
+    # buffer already uses (bf16 there; float16 here since this is a
+    # numpy/npz file, not a JAX array -- numpy has no native bf16).
     obs_fields = Observation._fields
-    mem_fields = mem_mod.MemoryState._fields
-    stacked = {f: np.stack([np.asarray(getattr(o, f)) for o, _m, _i in all_samples]) for f in obs_fields}
-    for f in mem_fields:
-        stacked[f"mem_{f}"] = np.stack([np.asarray(getattr(m, f)) for _o, m, _i in all_samples])
-    stacked["action_index"] = np.array([idx for _o, _m, idx in all_samples], dtype=np.int64)
+    stacked = {f: np.stack([np.asarray(getattr(o, f)) for o, _s, _i in all_samples]) for f in obs_fields}
+    if args.network == "transformer":
+        for f in aug_mod.AugmentedObsState._fields:
+            vals = np.stack([np.asarray(getattr(s, f)) for _o, s, _i in all_samples])
+            stacked[f"obs_state_{f}"] = vals.astype(np.float16) if vals.dtype != np.bool_ else vals
+    else:
+        for f in mem_mod.MemoryState._fields:
+            stacked[f"mem_{f}"] = np.stack([np.asarray(getattr(s, f)) for _o, s, _i in all_samples])
+    stacked["action_index"] = np.array([idx for _o, _s, idx in all_samples], dtype=np.int64)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
