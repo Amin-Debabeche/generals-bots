@@ -25,6 +25,36 @@ class NetworkConfig:
 
 
 @dataclass(frozen=True)
+class TransformerNetworkConfig:
+    """Geometry for training/network_transformer.py -- adapted from
+    strakam/AverageJoe's HistoryTransformer (the #1-ranked real generals.io
+    ladder bot), kept as a separate dataclass from NetworkConfig rather than
+    overloading it with irrelevant CNN-only/transformer-only fields. See
+    ~/.claude/plans/drifting-questing-babbage.md for the full rationale.
+    """
+    grid_size: int = 21
+    # 24 base augmented channels (training/augment.py, adapted from
+    # AverageJoe's networks/common.py:augment_obs) + 2*history_size per-cell
+    # army-delta stacks.
+    history_size: int = 5  # AverageJoe default is 7; trimmed for CPU-smoke-test/Colab memory budget
+    n_channels: int = 24 + 2 * history_size
+    # patch_size=1 would preserve per-cell resolution but at ~300x the
+    # attention cost of patch_size=3 for zero action-space benefit (per-cell
+    # logits come from the per-patch head's 9*M*M output + unpatchify, not
+    # from patch_size itself) -- see plan doc. 21 is divisible by 1,3,7,21.
+    patch_size: int = 3
+    depth: int = 4  # AverageJoe S config default; L uses 6-8, GPU-budget dependent
+    embed_dim: int = 192  # trimmed from AverageJoe's 256-352 for a smaller first pass
+    n_head: int = 8
+    ff_factor: int = 4
+    value_hidden: int = 64
+    # Per-cell action kinds: 4 directions x {all-in, half} + 1 build = 9
+    num_cell_actions: int = 9
+    temporal_window: int = 128  # AverageJoe default 512; trimmed, see history_size note
+    temporal_hidden: int = 256
+
+
+@dataclass(frozen=True)
 class PPOConfig:
     num_envs: int = 512
     num_steps: int = 256
