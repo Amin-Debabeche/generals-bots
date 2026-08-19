@@ -20,9 +20,12 @@ import optax
 
 from generals.core.observation import Observation
 from training import action_space as asp
+from training import augment as aug_mod
 from training import magnet as mg
+from training.augment import AugmentedObsState
 from training.memory import MemoryState
 from training.network import PolicyValueNetwork
+from training.network_transformer import TransformerPolicyValueNetwork
 
 
 class FlatBatch(NamedTuple):
@@ -118,6 +121,106 @@ def make_train_step(optimizer: optax.GradientTransformation, build_castles_enabl
 
     @eqx.filter_jit
     def train_step(net, opt_state, batch: FlatBatch, clip_eps, value_coef, entropy_coef):
+        (_loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
+            net, batch, clip_eps, value_coef, entropy_coef
+        )
+        updates, opt_state = optimizer.update(grads, opt_state, net)
+        net = eqx.apply_updates(net, updates)
+        return net, opt_state, metrics
+
+    return train_step
+
+
+class FlatBatchTransformer(NamedTuple):
+    obs: Observation
+    obs_state: AugmentedObsState
+    action_index: jnp.ndarray
+    old_logprob: jnp.ndarray
+    advantage: jnp.ndarray
+    ret: jnp.ndarray
+
+
+def flatten_batch_transformer(trajectory, advantages: jnp.ndarray, returns: jnp.ndarray) -> FlatBatchTransformer:
+    """Transformer-path twin of flatten_batch -- trajectory: rollout.py's
+    StepDataTransformer with leading axes (num_steps, num_envs, ...)."""
+    def flat(x):
+        return x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:])
+
+    return FlatBatchTransformer(
+        obs=jax.tree.map(flat, trajectory.obs),
+        obs_state=jax.tree.map(flat, trajectory.obs_state),
+        action_index=flat(trajectory.action_index),
+        old_logprob=flat(trajectory.logprob),
+        advantage=flat(advantages),
+        ret=flat(returns),
+    )
+
+
+def _forward_one_transformer(net: TransformerPolicyValueNetwork, obs: Observation, obs_state: AugmentedObsState,
+                              action_index: jnp.ndarray, build_castles_enabled: bool):
+    # obs_state arrives here as whatever FlatBatchTransformer carries -- bf16
+    # for its float leaves, per training/rollout.py's trajectory-storage
+    # mitigation (the scan CARRY used during actual rollout stayed float32;
+    # only the copy written into the trajectory was downcast). Upcasting here
+    # recomputes from that same stored (already bf16-rounded) copy, not a
+    # phantom full-precision value that was never actually persisted -- so
+    # old_logprob (computed rollout-time from the true float32 carry) and the
+    # logprob recomputed here carry a small extra discrepancy beyond ordinary
+    # float32 rounding. This is the accepted cost of the memory mitigation,
+    # not a bug: PPO's clipped ratio and target_kl exist precisely to tolerate
+    # bounded old-vs-new policy drift, and this adds a fixed, small amount of
+    # it, the same way any bf16-activation training run does.
+    obs_state = jax.tree.map(
+        lambda x: x.astype(jnp.float32) if jnp.issubdtype(x.dtype, jnp.floating) else x, obs_state
+    )
+    augmented, new_state = aug_mod.augment_obs(obs, obs_state)
+    normed = aug_mod.normalize_augmented(augmented)
+    temporal = aug_mod.temporal_data(new_state)
+    logits, value = net(normed, temporal)
+    mask = asp.compute_legal_action_mask(obs, build_castles_enabled)
+    logprob, entropy = asp.logprob_and_entropy(logits, mask, action_index)
+
+    # KL(policy || magnet) -- see training/ppo.py's _forward_one for the same
+    # mechanism on the CNN path. expander_magnet is confirmed
+    # architecture-agnostic (operates on the raw Observation + legal mask,
+    # never the network tensor), so this is identical to the CNN version.
+    log_probs = asp.masked_log_softmax(logits, mask)
+    magnet_dist = mg.expander_magnet(obs, mask)
+    magnet_kl = -entropy - jnp.sum(jnp.exp(log_probs) * jnp.log(magnet_dist + 1e-10))
+
+    return logprob, entropy, value, magnet_kl
+
+
+def make_train_step_transformer(optimizer: optax.GradientTransformation, build_castles_enabled: bool):
+    """Transformer-path twin of make_train_step."""
+
+    def loss_fn(net, batch: FlatBatchTransformer, clip_eps, value_coef, entropy_coef):
+        logprob, entropy, value, magnet_kl = jax.vmap(
+            lambda o, s, a: _forward_one_transformer(net, o, s, a, build_castles_enabled)
+        )(batch.obs, batch.obs_state, batch.action_index)
+
+        ratio = jnp.exp(logprob - batch.old_logprob)
+        clipped_ratio = jnp.clip(ratio, 1 - clip_eps, 1 + clip_eps)
+        policy_loss = -jnp.mean(jnp.minimum(ratio * batch.advantage, clipped_ratio * batch.advantage))
+
+        value_loss = jnp.mean(0.5 * (value - batch.ret) ** 2)
+        entropy_bonus = jnp.mean(entropy)
+        magnet_kl_mean = jnp.mean(magnet_kl)
+
+        loss = policy_loss + value_coef * value_loss + entropy_coef * magnet_kl_mean
+
+        approx_kl = jnp.mean(batch.old_logprob - logprob)
+        clip_frac = jnp.mean((jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32))
+
+        metrics = {
+            "loss": loss, "policy_loss": policy_loss, "value_loss": value_loss,
+            "entropy": entropy_bonus, "magnet_kl": magnet_kl_mean,
+            "approx_kl": approx_kl, "clip_frac": clip_frac,
+        }
+        return loss, metrics
+
+    @eqx.filter_jit
+    def train_step(net, opt_state, batch: FlatBatchTransformer, clip_eps, value_coef, entropy_coef):
         (_loss, metrics), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(
             net, batch, clip_eps, value_coef, entropy_coef
         )
