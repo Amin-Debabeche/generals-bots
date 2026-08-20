@@ -41,6 +41,22 @@ Usage:
         --ckpt-dir /content/drive/MyDrive/generals-runs/colab1 \\
         --push-status --wandb --wandb-project generals-bots-transformer
 """
+import os
+
+# Must be set before jax (or anything that imports jax, e.g. equinox) is
+# ever imported -- JAX reads this once at first initialization. Default
+# behavior pre-allocates ~90% of GPU memory as one arena up front; as this
+# script's rollout collection (3 differently-shaped opponent buckets) and
+# PPO backward pass allocate/free different-shaped buffers each iteration,
+# that arena can fragment into pieces too small to satisfy a later request
+# even with plenty of total free memory -- confirmed on a real Colab run:
+# minibatch_size=128 got through 2 clean iterations, then RESOURCE_EXHAUSTED
+# on a mere ~110MB allocation at iteration 3, the fragmentation signature
+# (a huge failed allocation would instead mean "still too big", not this).
+# setdefault, not a hard assignment: don't override an explicit choice the
+# user already made via the shell/notebook environment.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 import argparse
 import json
 import signal
