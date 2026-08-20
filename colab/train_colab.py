@@ -70,6 +70,12 @@ def parse_args():
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--num-envs", type=int, default=None, help=f"default: {PPOConfig().num_envs}")
     p.add_argument("--num-steps", type=int, default=None, help=f"default: {PPOConfig().num_steps}")
+    p.add_argument("--minibatch-size", type=int, default=None,
+                    help=f"default: {PPOConfig().minibatch_size}. The direct lever for a GPU "
+                         "out-of-memory error during the PPO update (train_step's forward+backward "
+                         "pass over one minibatch is the single largest per-op allocation in this "
+                         "script) -- lower this first, before --num-envs/--num-steps, since those "
+                         "only change how many minibatches there are, not each one's size")
     p.add_argument("--hunter-frac", type=float, default=0.15)
     p.add_argument("--expander-frac", type=float, default=0.15)
     p.add_argument("--max-wall-clock-hours", type=float, default=None)
@@ -149,8 +155,10 @@ def main():
     cfg = TransformerNetworkConfig()
     default_ppo = PPOConfig()
     ppo_cfg = PPOConfig(num_envs=args.num_envs or default_ppo.num_envs,
-                         num_steps=args.num_steps or default_ppo.num_steps)
+                         num_steps=args.num_steps or default_ppo.num_steps,
+                         minibatch_size=args.minibatch_size or default_ppo.minibatch_size)
     print(f"run_id={args.run_id} num_envs={ppo_cfg.num_envs} num_steps={ppo_cfg.num_steps} "
+          f"minibatch_size={ppo_cfg.minibatch_size} "
           f"num_epochs={ppo_cfg.num_epochs} ckpt_dir={ckpt_dir_root}")
 
     stage = cur.STAGE_E  # full competition ruleset -- the only stage this script trains
