@@ -18,6 +18,16 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
 ]
+# training/ + colab/ (self-play PPO, BC pipelines, Colab training script) --
+# not needed to just use the `generals` engine/competition sandbox, so kept
+# out of the base dependency list. Install with `pip install -e ".[training]"`.
+training = [
+    "equinox>=0.13.8",
+    "optax>=0.2.8",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.0",
+    "requests>=2.34.2",
+]
 
 [project.urls]
 Homepage = "https://generals.bot"
