@@ -23,18 +23,23 @@ Colab session restarts cleanly, minus the stage_idx/iters_in_stage fields
 Runnable two ways:
   - Locally (CPU, tiny --num-envs/--num-steps) to smoke-test before ever
     touching Colab -- the same discipline every other change in this plan
-    followed. No GPU, no Drive, no PAT needed for this.
+    followed. No GPU, no Drive, no PAT, no wandb account needed for this
+    (both --push-status and --wandb default off, and wandb itself is only
+    imported when --wandb is actually passed -- matching how this script
+    never imports `google.colab` either, so it stays portable/testable
+    outside Colab without needing every optional integration installed).
   - On actual Colab GPU, from a notebook cell (see colab/train_colab.ipynb)
-    after mounting Drive (for --ckpt-dir) and setting a GITHUB_PAT secret
-    (for --push-status). This script itself never imports `google.colab` --
-    it just reads a GITHUB_PAT env var and an arbitrary --ckpt-dir path, so
-    it stays portable/testable outside Colab. The notebook cell is
-    responsible for `os.environ["GITHUB_PAT"] = userdata.get("GITHUB_PAT")`
-    and `drive.mount(...)` before invoking this.
+    after mounting Drive (for --ckpt-dir), setting a GITHUB_PAT secret (for
+    --push-status), and/or a WANDB_API_KEY secret (for --wandb, live
+    metrics charts at wandb.ai instead of tailing metrics.jsonl). The
+    notebook cell is responsible for exporting these into the environment
+    (`os.environ["GITHUB_PAT"] = userdata.get("GITHUB_PAT")`, etc.) and
+    `drive.mount(...)` before invoking this.
 
 Usage:
     python -m colab.train_colab --run-id colab1 \\
-        --ckpt-dir /content/drive/MyDrive/generals-runs/colab1 --push-status
+        --ckpt-dir /content/drive/MyDrive/generals-runs/colab1 \\
+        --push-status --wandb --wandb-project generals-bots-transformer
 """
 import argparse
 import json
@@ -102,6 +107,16 @@ def parse_args():
     p.add_argument("--github-pat", type=str, default=None,
                     help="default: $GITHUB_PAT env var. Only needed with --push-status.")
     p.add_argument("--git-branch", type=str, default="master")
+    p.add_argument("--wandb", action="store_true",
+                    help="log every iteration's metrics to Weights & Biases -- a live-updating "
+                         "dashboard (loss/entropy/kl/reward/per-bucket win-rate charts) instead of "
+                         "tailing metrics.jsonl by hand. Requires the wandb package (pip install "
+                         "wandb) and a logged-in account -- only imported/required when this flag "
+                         "is passed, never otherwise.")
+    p.add_argument("--wandb-project", type=str, default="generals-bots-transformer")
+    p.add_argument("--wandb-entity", type=str, default=None, help="wandb team/username; default: your account's default")
+    p.add_argument("--wandb-api-key", type=str, default=None,
+                    help="default: $WANDB_API_KEY env var. Only needed with --wandb.")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
@@ -174,6 +189,40 @@ def push_status(status_path: Path, payload: dict, github_pat: str | None, branch
         print(f"[push_status] git push failed, skipping: {push.stderr[:500]}")
 
 
+def init_wandb(args, ppo_cfg: PPOConfig, cfg: TransformerNetworkConfig, stage, resuming: bool):
+    """Lazy import -- wandb is only ever required when --wandb is actually
+    passed, same reasoning as never importing `google.colab` unconditionally
+    (see module docstring). `id=args.run_id` + `resume="allow"` makes a
+    resumed Colab session (killed and restarted with the same --run-id)
+    continue logging to the SAME wandb run instead of creating a new one
+    each time, mirroring the checkpoint/metrics.jsonl resume convention
+    everywhere else in this script."""
+    import os
+    import wandb
+
+    api_key = args.wandb_api_key or os.environ.get("WANDB_API_KEY")
+    if api_key:
+        wandb.login(key=api_key)
+
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        id=args.run_id,
+        name=args.run_id,
+        resume="allow",
+        config={
+            "num_envs": ppo_cfg.num_envs, "num_steps": ppo_cfg.num_steps,
+            "minibatch_size": ppo_cfg.minibatch_size, "num_epochs": ppo_cfg.num_epochs,
+            "gamma": ppo_cfg.gamma, "lam": ppo_cfg.lam, "clip_eps": ppo_cfg.clip_eps,
+            "learning_rate": ppo_cfg.learning_rate, "adv_top_frac": ppo_cfg.adv_top_frac,
+            "target_kl": ppo_cfg.target_kl, "stage": stage.name,
+            "grid_size": cfg.grid_size, "patch_size": cfg.patch_size, "depth": cfg.depth,
+            "embed_dim": cfg.embed_dim, "n_head": cfg.n_head, "resuming": resuming,
+        },
+    )
+    return wandb
+
+
 def main():
     args = parse_args()
 
@@ -206,13 +255,16 @@ def main():
     full_ckpt_path = ckpt_dir / "latest_full.eqx"
 
     global_iteration = 0
-    if not args.fresh and meta_path.exists() and full_ckpt_path.exists():
+    resuming = not args.fresh and meta_path.exists() and full_ckpt_path.exists()
+    if resuming:
         meta = json.loads(meta_path.read_text())
         global_iteration = meta["global_iteration"]
         net, opt_state, ema_net = eqx.tree_deserialise_leaves(str(full_ckpt_path), (net, opt_state, ema_net))
         print(f"resumed: global_iteration={global_iteration}")
     else:
         print("starting fresh")
+
+    wb = init_wandb(args, ppo_cfg, cfg, stage, resuming) if args.wandb else None
 
     env = cur.build_env(stage)
     key, pool_key = jrandom.split(key)
@@ -332,6 +384,8 @@ def main():
                 **{k: float(v) for k, v in epoch_metrics.items()},
             }
             append_jsonl(metrics_path, metrics_row)
+            if wb:
+                wb.log(metrics_row, step=global_iteration)
             print(f"iter {global_iteration} loss={epoch_metrics['loss']:.4f} entropy={epoch_metrics['entropy']:.3f} "
                   f"kl={epoch_metrics['approx_kl']:.4f} reward={metrics_row['mean_reward']:+.4f} "
                   f"buckets={bucket_stats} sps={metrics_row['sps']:.0f} time={elapsed:.1f}s")
@@ -356,6 +410,8 @@ def main():
                 "run_id": args.run_id, "iteration": global_iteration, "ts": time.time(),
                 "status": f"crashed: {e!r}",
             }, args.github_pat, args.git_branch)
+        if wb:
+            wb.finish(exit_code=1)
         raise
 
     save_checkpoint()
@@ -364,6 +420,8 @@ def main():
             "run_id": args.run_id, "iteration": global_iteration, "ts": time.time(),
             "status": "stopped_ok",
         }, args.github_pat, args.git_branch)
+    if wb:
+        wb.finish()
     print(f"stopped cleanly at iter {global_iteration}")
 
 

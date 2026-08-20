@@ -38,6 +38,14 @@ training = [
     "pyarrow>=14.0.0",
     "requests>=2.25.0",
 ]
+# colab/train_colab.py's optional --wandb live-metrics dashboard. Separate
+# from `training` (unconditionally needed just to run training/ code) since
+# this is genuinely opt-in -- colab/train_colab.py only imports wandb inside
+# the code path that runs when --wandb is passed, never otherwise, so local
+# CPU smoke-testing doesn't need it installed at all.
+colab = [
+    "wandb>=0.17.0",
+]
 
 [project.urls]
 Homepage = "https://generals.bot"
