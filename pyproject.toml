@@ -24,9 +24,19 @@ dev = [
 training = [
     "equinox>=0.13.8",
     "optax>=0.2.8",
-    "pandas>=3.0.5",
-    "pyarrow>=25.0.0",
-    "requests>=2.34.2",
+    # Lower bounds only, loose on purpose: training/human_replays.py's and
+    # training/leaderboard_replays.py's actual pandas/requests usage
+    # (read_parquet, basic DataFrame indexing; requests.get+.json()) has been
+    # stable for years, so there's no reason to force an upgrade past
+    # whatever's already installed. Pinning these to this project's own dev
+    # venv version (pandas>=3.0.5, requests>=2.34.2) broke a fresh Colab
+    # install: Colab ships pandas==2.2.3/requests==2.32.4 for its own
+    # cudf-cu12/dask-cudf-cu12/google-colab stack (which needs pandas<2.4.0),
+    # and pip's resolver upgraded past those to satisfy the tighter bound,
+    # producing real dependency conflicts with packages already installed.
+    "pandas>=2.0.0",
+    "pyarrow>=14.0.0",
+    "requests>=2.25.0",
 ]
 
 [project.urls]
