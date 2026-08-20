@@ -60,6 +60,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 HEURISTIC_AGENTS = {"hunter": HunterAgent(), "expander": ExpanderAgent()}
 
+# See --minibatch-size's help text: much lower than PPOConfig's own default
+# (1024, tuned for the lighter CNN), chosen from a real Colab OOM at 1024 on
+# a 15GB GPU -- a reasoned starting point, not a verified-safe number.
+_DEFAULT_MINIBATCH_SIZE = 128
+
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -70,12 +75,17 @@ def parse_args():
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--num-envs", type=int, default=None, help=f"default: {PPOConfig().num_envs}")
     p.add_argument("--num-steps", type=int, default=None, help=f"default: {PPOConfig().num_steps}")
-    p.add_argument("--minibatch-size", type=int, default=None,
-                    help=f"default: {PPOConfig().minibatch_size}. The direct lever for a GPU "
-                         "out-of-memory error during the PPO update (train_step's forward+backward "
-                         "pass over one minibatch is the single largest per-op allocation in this "
-                         "script) -- lower this first, before --num-envs/--num-steps, since those "
-                         "only change how many minibatches there are, not each one's size")
+    p.add_argument("--minibatch-size", type=int, default=_DEFAULT_MINIBATCH_SIZE,
+                    help=f"default: {_DEFAULT_MINIBATCH_SIZE} -- deliberately much lower than "
+                         f"PPOConfig's own default ({PPOConfig().minibatch_size}, tuned for the "
+                         "lighter CNN). A real Colab run OOM'd at 1024 trying to allocate ~3.5GiB "
+                         "for a single op on a 15GB GPU; this is an untested-on-GPU but reasoned "
+                         "starting point (~8x smaller), not a guarantee -- if it still OOMs, halve "
+                         "it again. The direct lever for a GPU OOM during the PPO update "
+                         "(train_step's forward+backward pass over one minibatch is the single "
+                         "largest per-op allocation in this script) -- adjust this first, before "
+                         "--num-envs/--num-steps, since those only change how many minibatches "
+                         "there are, not each one's size")
     p.add_argument("--hunter-frac", type=float, default=0.15)
     p.add_argument("--expander-frac", type=float, default=0.15)
     p.add_argument("--max-wall-clock-hours", type=float, default=None)
@@ -113,13 +123,28 @@ def push_status(status_path: Path, payload: dict, github_pat: str | None, branch
     accident. git pull --rebase BEFORE writing/committing: a restarted Colab
     session (this run's own past incarnation, or the user re-running the
     same --run-id) must not clobber another still-running session's more
-    recent status push."""
+    recent status push.
+
+    Defensively resets `status_path` out of the index before every pull and
+    after any failed commit -- a fresh Colab clone has no git identity
+    configured, so `git commit` fails outright the first time this runs;
+    the original version of this function left the file `git add`-staged
+    on that failure without ever undoing it, which then made every
+    SUBSEQUENT call's `git pull --rebase` fail too ("index contains
+    uncommitted changes"), permanently, for the rest of that clone's
+    lifetime -- confirmed by hitting exactly this in a real Colab run."""
     import os
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
 
     def run(cmd):
         return subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+
+    # Local to this one clone (not --global) -- a fresh Colab session has no
+    # git identity configured at all, and `git commit` refuses to run
+    # without one.
+    run(["git", "config", "user.email", "colab-train-bot@users.noreply.github.com"])
+    run(["git", "config", "user.name", "colab-train-bot"])
 
     pat = github_pat or os.environ.get("GITHUB_PAT")
     remote_url = run(["git", "remote", "get-url", "origin"]).stdout.strip()
@@ -128,15 +153,21 @@ def push_status(status_path: Path, payload: dict, github_pat: str | None, branch
     else:
         authed_url = remote_url
 
+    # Clear any staged-but-uncommitted leftovers from a prior call before
+    # pulling -- git refuses to `pull --rebase` with a dirty index.
+    run(["git", "reset", "--", str(status_path)])
+
     pull = run(["git", "pull", "--rebase", authed_url, branch])
     if pull.returncode != 0:
         print(f"[push_status] git pull --rebase failed, skipping this push: {pull.stderr[:500]}")
+        run(["git", "rebase", "--abort"])  # leave the repo clean for the next call, win or lose
         return
 
     status_path.write_text(json.dumps(payload, indent=2))
     run(["git", "add", str(status_path)])
     commit = run(["git", "commit", "-m", f"colab status: {payload.get('run_id')} iter {payload.get('iteration')}"])
     if commit.returncode != 0:
+        run(["git", "reset", "--", str(status_path)])  # undo the add -- keep the index clean either way
         return  # nothing changed since last push, or commit failed either way -- not fatal
     push = run(["git", "push", authed_url, f"HEAD:{branch}"])
     if push.returncode != 0:
@@ -156,7 +187,7 @@ def main():
     default_ppo = PPOConfig()
     ppo_cfg = PPOConfig(num_envs=args.num_envs or default_ppo.num_envs,
                          num_steps=args.num_steps or default_ppo.num_steps,
-                         minibatch_size=args.minibatch_size or default_ppo.minibatch_size)
+                         minibatch_size=args.minibatch_size)  # always set -- see _DEFAULT_MINIBATCH_SIZE
     print(f"run_id={args.run_id} num_envs={ppo_cfg.num_envs} num_steps={ppo_cfg.num_steps} "
           f"minibatch_size={ppo_cfg.minibatch_size} "
           f"num_epochs={ppo_cfg.num_epochs} ckpt_dir={ckpt_dir_root}")
