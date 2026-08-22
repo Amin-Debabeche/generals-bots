@@ -86,6 +86,13 @@ HEURISTIC_AGENTS = {"hunter": HunterAgent(), "expander": ExpanderAgent()}
 # a 15GB GPU -- a reasoned starting point, not a verified-safe number.
 _DEFAULT_MINIBATCH_SIZE = 128
 
+# See --num-envs's help text: a real crash traceback pinned an OOM to
+# flatten_batch_transformer reshaping the rollout trajectory itself (before
+# minibatching even starts) at the CNN-tuned default of 512 -- num_envs
+# directly sizes that trajectory buffer, unlike minibatch_size above (which
+# only affects the later, separate PPO gradient step).
+_DEFAULT_NUM_ENVS = 256
+
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -94,7 +101,13 @@ def parse_args():
                     help="where checkpoints/metrics.jsonl live -- default training/runs/<run-id> "
                          "(gitignored, local only); pass a Drive-mounted path on real Colab runs")
     p.add_argument("--fresh", action="store_true")
-    p.add_argument("--num-envs", type=int, default=None, help=f"default: {PPOConfig().num_envs}")
+    p.add_argument("--num-envs", type=int, default=_DEFAULT_NUM_ENVS,
+                    help=f"default: {_DEFAULT_NUM_ENVS} -- deliberately lower than PPOConfig's own "
+                         f"default ({PPOConfig().num_envs}, tuned for the lighter CNN). A real Colab "
+                         "crash traceback pinned the OOM to flatten_batch_transformer reshaping the "
+                         "rollout trajectory itself, before minibatching starts -- this is the lever "
+                         "that actually shrinks that buffer (see --minibatch-size for the separate "
+                         "PPO-gradient-step lever)")
     p.add_argument("--num-steps", type=int, default=None, help=f"default: {PPOConfig().num_steps}")
     p.add_argument("--minibatch-size", type=int, default=_DEFAULT_MINIBATCH_SIZE,
                     help=f"default: {_DEFAULT_MINIBATCH_SIZE} -- deliberately much lower than "
@@ -250,7 +263,7 @@ def main():
 
     cfg = TransformerNetworkConfig()
     default_ppo = PPOConfig()
-    ppo_cfg = PPOConfig(num_envs=args.num_envs or default_ppo.num_envs,
+    ppo_cfg = PPOConfig(num_envs=args.num_envs,  # always set -- see _DEFAULT_NUM_ENVS
                          num_steps=args.num_steps or default_ppo.num_steps,
                          minibatch_size=args.minibatch_size)  # always set -- see _DEFAULT_MINIBATCH_SIZE
     print(f"run_id={args.run_id} num_envs={ppo_cfg.num_envs} num_steps={ppo_cfg.num_steps} "
