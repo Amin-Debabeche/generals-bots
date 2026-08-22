@@ -1,41 +1,6 @@
 {
   "run_id": "colab1",
-  "iteration": 20,
-  "ts": 1787390575.6284182,
-  "status": "running",
-  "recent_metrics": {
-    "ts": 1787390574.989807,
-    "iteration": 20,
-    "wall_clock_iter_s": 55.84128189086914,
-    "sps": 2347.2240529175992,
-    "mean_reward": -0.00032019379432313144,
-    "buckets": {
-      "hunter": {
-        "episodes": 44,
-        "wins": 0,
-        "losses": 44,
-        "draws": 0
-      },
-      "expander": {
-        "episodes": 0,
-        "wins": 0,
-        "losses": 0,
-        "draws": 0
-      },
-      "selfplay": {
-        "episodes": 0,
-        "wins": 0,
-        "losses": 0,
-        "draws": 0
-      }
-    },
-    "epochs_used": 1,
-    "approx_kl": 0.007414484862238169,
-    "clip_frac": 0.08551025390625,
-    "entropy": 4.535407066345215,
-    "loss": 0.23588316142559052,
-    "magnet_kl": 1.0825103521347046,
-    "policy_loss": 0.019470274448394775,
-    "value_loss": 0.43066081404685974
-  }
+  "iteration": 21,
+  "ts": 1787390670.3536932,
+  "status": "crashed: ValueError('RESOURCE_EXHAUSTED: Out of memory while trying to allocate 115605504 bytes.')"
 }
