@@ -46,6 +46,12 @@ training = [
 colab = [
     "wandb>=0.17.0",
 ]
+# modal/train_modal.py's remote-GPU orchestration -- only needed on whatever
+# machine actually invokes `modal run`/`modal deploy` (this one), not inside
+# the Modal container itself (that gets its own separate modal.Image spec).
+modal = [
+    "modal>=1.5.4",
+]
 
 [project.urls]
 Homepage = "https://generals.bot"
