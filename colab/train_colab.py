@@ -86,12 +86,18 @@ HEURISTIC_AGENTS = {"hunter": HunterAgent(), "expander": ExpanderAgent()}
 # a 15GB GPU -- a reasoned starting point, not a verified-safe number.
 _DEFAULT_MINIBATCH_SIZE = 128
 
-# See --num-envs's help text: a real crash traceback pinned an OOM to
-# flatten_batch_transformer reshaping the rollout trajectory itself (before
-# minibatching even starts) at the CNN-tuned default of 512 -- num_envs
-# directly sizes that trajectory buffer, unlike minibatch_size above (which
-# only affects the later, separate PPO gradient step).
-_DEFAULT_NUM_ENVS = 256
+# See --num-envs's help text. First found at 512 (OOM inside
+# flatten_batch_transformer's trajectory reshape); halving to 256 wasn't
+# enough either -- a second real crash traceback moved to the bucket-merge
+# line just before it (`jnp.concatenate(xs, axis=1)` over the 3 opponent
+# buckets' trajectories), and the exact byte count confirmed why: eager
+# (non-jitted) jnp.concatenate has to hold the source buffers AND the new
+# destination buffer live simultaneously before it can free the sources --
+# a real, unavoidable ~2x transient spike on top of the steady-state
+# trajectory buffer, network, and optimizer state that are already resident.
+# num_envs is still the right lever (it scales that spike directly too), it
+# just needed to go lower than 256.
+_DEFAULT_NUM_ENVS = 128
 
 
 def parse_args():
@@ -102,12 +108,15 @@ def parse_args():
                          "(gitignored, local only); pass a Drive-mounted path on real Colab runs")
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--num-envs", type=int, default=_DEFAULT_NUM_ENVS,
-                    help=f"default: {_DEFAULT_NUM_ENVS} -- deliberately lower than PPOConfig's own "
-                         f"default ({PPOConfig().num_envs}, tuned for the lighter CNN). A real Colab "
-                         "crash traceback pinned the OOM to flatten_batch_transformer reshaping the "
-                         "rollout trajectory itself, before minibatching starts -- this is the lever "
-                         "that actually shrinks that buffer (see --minibatch-size for the separate "
-                         "PPO-gradient-step lever)")
+                    help=f"default: {_DEFAULT_NUM_ENVS} -- deliberately much lower than PPOConfig's own "
+                         f"default ({PPOConfig().num_envs}, tuned for the lighter CNN). Two real Colab "
+                         "crash tracebacks pinned OOMs to (1) flatten_batch_transformer reshaping the "
+                         "rollout trajectory and (2) jnp.concatenate merging the 3 opponent buckets' "
+                         "trajectories beforehand -- both scale directly with num_envs, and (2) "
+                         "specifically needs a real transient ~2x spike (source + destination buffers "
+                         "coexisting) on top of everything else already resident. This is the lever "
+                         "that shrinks both (see --minibatch-size for the separate PPO-gradient-step "
+                         "lever, which is unrelated to either crash site)")
     p.add_argument("--num-steps", type=int, default=None, help=f"default: {PPOConfig().num_steps}")
     p.add_argument("--minibatch-size", type=int, default=_DEFAULT_MINIBATCH_SIZE,
                     help=f"default: {_DEFAULT_MINIBATCH_SIZE} -- deliberately much lower than "
