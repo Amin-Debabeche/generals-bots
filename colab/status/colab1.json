@@ -1,6 +1,6 @@
 {
   "run_id": "colab1",
-  "iteration": 21,
-  "ts": 1787390670.3536932,
+  "iteration": 24,
+  "ts": 1787532569.976356,
   "status": "crashed: ValueError('RESOURCE_EXHAUSTED: Out of memory while trying to allocate 115605504 bytes.')"
 }
